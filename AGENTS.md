@@ -2,6 +2,9 @@
 
 Physics simulations and experiments, written for fun.
 
+## Git workflow
+- Work directly on `main`. Don't create branches or pull requests unless the user says otherwise.
+
 ## Stack
 - Language: Rust
 - Graphics: [macroquad](https://github.com/not-fl3/macroquad)

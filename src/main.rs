@@ -22,7 +22,7 @@ fn main() {
         window_height: 600,
         ..Default::default()
     };
-    macroquad::Window::from_config(conf, run((entry.create)(), title));
+    macroquad::Window::from_config(conf, run(entry.create, title));
 }
 
 fn usage(error: &str) -> ! {
@@ -32,7 +32,8 @@ fn usage(error: &str) -> ! {
     std::process::exit(1);
 }
 
-async fn run(mut sim: Box<dyn Simulation>, title: String) {
+async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
+    let mut sim = create();
     let mut paused = true; // start paused
     let mut lag = 0.0; // real time not yet simulated
 
@@ -48,6 +49,13 @@ async fn run(mut sim: Box<dyn Simulation>, title: String) {
                 sim.step(DT);
                 lag -= DT;
             }
+        }
+
+        if sim.is_over() {
+            // Back to the initial state, paused.
+            sim = create();
+            paused = true;
+            lag = 0.0;
         }
 
         clear_background(BLACK);

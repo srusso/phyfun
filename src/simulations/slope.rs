@@ -17,6 +17,9 @@ pub struct Slope {
     t: f32,
 }
 
+/// Where the block's center is when it reaches the bottom.
+const END: f32 = SLOPE_LENGTH - BLOCK_SIZE / 2.0;
+
 impl Slope {
     pub fn new() -> Self {
         Self { s: BLOCK_SIZE / 2.0, v: 0.0, t: 0.0 }
@@ -25,20 +28,17 @@ impl Slope {
 
 impl Simulation for Slope {
     fn step(&mut self, dt: f32) {
-        let end = SLOPE_LENGTH - BLOCK_SIZE / 2.0;
-        if self.s >= end {
-            return; // reached the bottom, stay put
-        }
         // Gravity's component along the slope; the normal force cancels the rest.
         let a = G * ANGLE.sin();
         // Semi-implicit Euler: update v first, then s with the new v.
         self.v += a * dt;
         self.s += self.v * dt;
         self.t += dt;
-        if self.s >= end {
-            self.s = end;
-            self.v = 0.0;
-        }
+        self.s = self.s.min(END); // don't poke through the bottom
+    }
+
+    fn is_over(&self) -> bool {
+        self.s >= END
     }
 
     fn draw(&self) {

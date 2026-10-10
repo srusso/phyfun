@@ -40,7 +40,7 @@ fn camera_for(bounds: Rect) -> Camera2D {
     }
     Camera2D {
         target: vec2(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
-        zoom: vec2(2.0 / w, 2.0 / h),
+        zoom: vec2(2.0 / w, -2.0 / h), // negative y so that world y points up on screen
         ..Default::default()
     }
 }

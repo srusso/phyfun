@@ -15,6 +15,13 @@ const DAYS_PER_YEAR: f64 = 365.25;
 /// Speed of light in AU/yr (299792.458 km/s).
 const C: f64 = 299_792.458 * YEAR_S / AU_KM;
 
+/// Earth's oblateness (equatorial bulge), which pulls on the Moon: the J2 coefficient, the
+/// equatorial radius (km), and the axis tilt from the ecliptic (arcseconds). The axis is fixed:
+/// letting it precess changes the Moon by only ~1 km over a century.
+const EARTH_J2: f64 = 1.082_625_45e-3;
+const EARTH_RADIUS_KM: f64 = 6378.1363;
+const EARTH_TILT_ARCSEC: f64 = 84_381.448;
+
 /// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit, and
 /// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves positions accurate to
 /// ~1e-8 AU over a century, far below the errors of the model itself.
@@ -96,8 +103,9 @@ struct Body {
 
 /// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body), plus the
 /// Sun's relativistic correction to every other body (the first post-Newtonian term, which is
-/// what makes Mercury's orbit precess). Not modelled: relativity between the planets themselves,
-/// asteroids, Pluto and the Kuiper belt, and the Moon's shape and tides.
+/// what makes Mercury's orbit precess) and the pull of Earth's equatorial bulge on the Moon.
+/// Not modelled: relativity between the planets themselves, asteroids, Pluto and the Kuiper
+/// belt, and the Moon's own shape and tides.
 /// Motion is 3D, so inclinations are real, but it is drawn from above the ecliptic.
 pub struct Planets {
     /// The Sun is `bodies[0]`.
@@ -165,6 +173,21 @@ impl Planets {
                 self.bodies[j].a -= d * (k * m_i);
             }
         }
+
+        // Extra pull of Earth's bulge on the Moon:
+        //   a = -3/2 J2 G m_earth R^2 / r^5 * [(1 - 5 z^2 / r^2) r_vec + 2 z p],
+        // with r_vec the Moon's position relative to Earth, p Earth's axis and z = r_vec . p.
+        let tilt = (EARTH_TILT_ARCSEC / 3600.0).to_radians();
+        let pole = dvec3(0.0, tilt.sin(), tilt.cos());
+        let radius = EARTH_RADIUS_KM / AU_KM;
+        let (earth, moon) = (&self.bodies[EARTH], &self.bodies[MOON]);
+        let rel = moon.pos - earth.pos;
+        let (r2, z) = (rel.length_squared(), rel.dot(pole));
+        let k = -1.5 * EARTH_J2 * G * earth.m * radius * radius / (r2 * r2 * r2.sqrt());
+        let a_moon = (rel * (1.0 - 5.0 * z * z / r2) + pole * (2.0 * z)) * k;
+        let moon_to_earth_mass = moon.m / earth.m;
+        self.bodies[MOON].a += a_moon;
+        self.bodies[EARTH].a -= a_moon * moon_to_earth_mass;
     }
 
     /// One velocity Verlet (kick-drift-kick) step: second order, time-symmetric, one Newtonian
@@ -438,13 +461,13 @@ mod tests {
 
     #[test]
     fn agrees_with_jpl_ephemeris() {
-        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 0.3 degrees as seen
+        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 0.08 degrees as seen
         // from Earth. What is left is mostly what the model leaves out: relativity between the
         // planets, asteroids, Pluto, and the Moon's shape and tides.
         let arcsec = std::f64::consts::PI / 180.0 / 3600.0;
         for (days, expected) in [(18_263.0, &HORIZONS_2050), (36_525.0, &HORIZONS_2100)] {
             for (i, error) in angle_errors_against(days, expected).iter().enumerate() {
-                let limit = if i + 1 == MOON { 0.3 * 3600.0 * arcsec } else { 0.05 * arcsec };
+                let limit = if i + 1 == MOON { 0.08 * 3600.0 * arcsec } else { 0.05 * arcsec };
                 assert!(*error < limit, "body {} off by {:.3} arcsec after {days} days", i + 1, error / arcsec);
             }
         }

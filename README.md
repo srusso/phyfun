@@ -12,5 +12,5 @@ Run without an argument to list the simulations. A simulation starts paused; pre
 
 ### Adding a simulation
 
-1. Create `src/simulations/<name>.rs` with a struct implementing `Simulation` (see `src/simulation.rs`).
+1. Create `src/simulations/<name>.rs` with a struct implementing `Simulation` (see `src/simulation.rs`). Draw in world coordinates (`world_bounds`) and put text in `hud`; `dt`, `time_scale` and `handle_input` are optional.
 2. Register it at the end of `SIMULATIONS` in `src/simulations/mod.rs`. Its number is its position in that list.

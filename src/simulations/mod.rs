@@ -1,3 +1,4 @@
+mod planets;
 mod slope;
 
 use crate::simulation::Simulation;
@@ -10,10 +11,10 @@ pub struct Entry {
 
 /// All simulations. A simulation's number is its position here, starting at 1,
 /// so append new ones at the end to keep existing numbers stable.
-pub const SIMULATIONS: &[Entry] = &[Entry {
-    name: "slope",
-    create: || Box::new(slope::Slope::new()),
-}];
+pub const SIMULATIONS: &[Entry] = &[
+    Entry { name: "slope", create: || Box::new(slope::Slope::new()) },
+    Entry { name: "planets", create: || Box::new(planets::Planets::new()) },
+];
 
 /// Finds a simulation by name (case-insensitive) or by number.
 /// Returns its number too.

@@ -12,6 +12,8 @@ const SUN_GM: f64 = 132_712_440_041.939_38; // km^3/s^2
 /// This is close to 4 pi^2 but not equal: the real Earth year isn't exactly 1 Julian year.
 const G: f64 = SUN_GM * YEAR_S * YEAR_S / (AU_KM * AU_KM * AU_KM);
 const DAYS_PER_YEAR: f64 = 365.25;
+/// Speed of light in AU/yr (299792.458 km/s).
+const C: f64 = 299_792.458 * YEAR_S / AU_KM;
 
 /// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit, and
 /// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves positions accurate to
@@ -92,7 +94,10 @@ struct Body {
     trail: VecDeque<DVec2>,
 }
 
-/// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body).
+/// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body), plus the
+/// Sun's relativistic correction to every other body (the first post-Newtonian term, which is
+/// what makes Mercury's orbit precess). Not modelled: relativity between the planets themselves,
+/// asteroids, Pluto and the Kuiper belt, and the Moon's shape and tides.
 /// Motion is 3D, so inclinations are real, but it is drawn from above the ecliptic.
 pub struct Planets {
     /// The Sun is `bodies[0]`.
@@ -162,19 +167,51 @@ impl Planets {
         }
     }
 
-    /// One velocity Verlet (kick-drift-kick) step: second order, symplectic, one force evaluation.
+    /// One velocity Verlet (kick-drift-kick) step: second order, time-symmetric, one Newtonian
+    /// force evaluation.
     fn leapfrog(&mut self, dt: f64) {
+        self.kick(dt / 2.0);
         for body in &mut self.bodies {
-            body.v += body.a * (dt / 2.0);
             body.pos += body.v * dt;
         }
         self.update_accelerations();
-        for body in &mut self.bodies {
-            body.v += body.a * (dt / 2.0);
+        self.kick(dt / 2.0);
+    }
+
+    /// Changes every velocity by `h` times its acceleration: the Newtonian `a` plus the
+    /// relativistic term. That term depends on velocity, so it is evaluated at the velocity
+    /// halfway through the kick, which keeps the step time-symmetric (and the integrator sixth order).
+    fn kick(&mut self, h: f64) {
+        let v_mid: Vec<DVec3> = self.bodies.iter().map(|body| body.v + body.a * (h / 2.0)).collect();
+        let a_rel = self.relativistic_accelerations(&v_mid);
+        for (body, a_rel) in self.bodies.iter_mut().zip(a_rel) {
+            body.v += (body.a + a_rel) * h;
         }
     }
 
-    /// Kinetic plus gravitational potential energy.
+    /// First post-Newtonian correction from the Sun's field, for velocities `v` (Sun is index 0):
+    ///   a = mu / (c^2 r^3) * [(4 mu / r - w^2) r_vec + 4 (r_vec . w) w],  mu = G m_sun,
+    /// with `r_vec` and `w` the position and velocity relative to the Sun. The reaction goes to the
+    /// Sun, so momentum stays conserved.
+    fn relativistic_accelerations(&self, v: &[DVec3]) -> Vec<DVec3> {
+        let sun = &self.bodies[0];
+        let mu = G * sun.m;
+        let mut a = vec![DVec3::ZERO; self.bodies.len()];
+        for (i, body) in self.bodies.iter().enumerate().skip(1) {
+            let rel = body.pos - sun.pos;
+            let w = v[i] - v[0];
+            let r = rel.length();
+            let a_i = (rel * (4.0 * mu / r - w.length_squared()) + w * (4.0 * rel.dot(w)))
+                * (mu / (C * C * r * r * r));
+            a[i] = a_i;
+            a[0] -= a_i * (body.m / sun.m);
+        }
+        a
+    }
+
+    /// Kinetic plus gravitational potential energy, plus the relativistic correction. That is
+    /// exact for one planet around the Sun and ignores cross terms between planets, so it
+    /// is conserved to ~1e-11 rather than ~1e-13.
     fn energy(&self) -> f64 {
         let mut e = 0.0;
         for (i, body) in self.bodies.iter().enumerate() {
@@ -182,6 +219,14 @@ impl Planets {
             for other in &self.bodies[(i + 1)..] {
                 e -= G * body.m * other.m / (other.pos - body.pos).length();
             }
+        }
+
+        let sun = &self.bodies[0];
+        let mu = G * sun.m;
+        for body in &self.bodies[1..] {
+            let w2 = (body.v - sun.v).length_squared();
+            let r = (body.pos - sun.pos).length();
+            e += body.m / (C * C) * (3.0 / 8.0 * w2 * w2 + 1.5 * mu * w2 / r + 0.5 * mu * mu / (r * r));
         }
         e
     }
@@ -314,7 +359,7 @@ mod tests {
             planets.step(DT);
         }
         let drift = (planets.energy() - planets.energy0) / planets.energy0.abs();
-        assert!(drift.abs() < 1e-11, "energy drift {drift}");
+        assert!(drift.abs() < 1e-10, "energy drift {drift}");
         assert!(planets.momentum().length() < 1e-12, "momentum {}", planets.momentum().length());
     }
 
@@ -332,14 +377,14 @@ mod tests {
     #[test]
     fn integrator_is_sixth_order() {
         // Halving the step should shrink the error ~2^6 = 64 times. The error is measured against
-        // a run with a much smaller step, for Mars and Jupiter. Smaller errors than ~1e-12 AU would
-        // be rounding noise, so the step is large; Earth is left out because the Moon's orbit isn't
-        // resolved at this step.
+        // a run with a much smaller step, for Venus and Mars. Smaller errors than ~1e-12 AU would
+        // be rounding noise (as for Jupiter), so the step is large; Earth is left out because the
+        // Moon's orbit isn't resolved at this step.
         let dt = 0.016;
         let reference = positions_after(4.0, dt / 8.0);
         let error = |dt: f64| {
             let pos = positions_after(4.0, dt);
-            [4, 5].map(|i| (pos[i] - reference[i]).length())
+            [2, 4].map(|i| (pos[i] - reference[i]).length())
         };
         let (coarse, fine) = (error(dt), error(dt / 2.0));
         for (c, f) in coarse.iter().zip(&fine) {
@@ -373,21 +418,34 @@ mod tests {
     [-0.16840341577891968, 0.969958343450389, -0.00019673126888694001], // Moon
     ];
 
-    /// Distance (AU) between the simulated positions relative to the Sun after `days` and JPL's.
-    fn errors_against(days: f64, expected: &[[f64; 3]; 9]) -> Vec<f64> {
+    /// Error of each simulated body after `days` as an angle (radians): the distance from JPL's
+    /// position divided by the distance to the Sun. The Moon is compared relative to Earth, since
+    /// seen from the Sun it would mostly measure Earth's error.
+    fn angle_errors_against(days: f64, expected: &[[f64; 3]; 9]) -> Vec<f64> {
         let pos = positions_after(days / DAYS_PER_YEAR, DT);
+        let expected = expected.map(DVec3::from);
         (1..10)
-            .map(|i| (pos[i] - pos[0] - DVec3::from(expected[i - 1])).length())
+            .map(|i| {
+                let (error, distance) = if i == MOON {
+                    (pos[MOON] - pos[EARTH] - (expected[MOON - 1] - expected[EARTH - 1]), (expected[MOON - 1] - expected[EARTH - 1]).length())
+                } else {
+                    (pos[i] - pos[0] - expected[i - 1], expected[i - 1].length())
+                };
+                error.length() / distance
+            })
             .collect()
     }
 
     #[test]
     fn agrees_with_jpl_ephemeris() {
-        // Not exact: this model has no relativity (Mercury's perihelion advance is ~1e-4 AU per
-        // century), asteroids or Pluto. The errors are at most ~6e-5 AU (9,000 km).
+        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 0.3 degrees as seen
+        // from Earth. What is left is mostly what the model leaves out: relativity between the
+        // planets, asteroids, Pluto, and the Moon's shape and tides.
+        let arcsec = std::f64::consts::PI / 180.0 / 3600.0;
         for (days, expected) in [(18_263.0, &HORIZONS_2050), (36_525.0, &HORIZONS_2100)] {
-            for (i, error) in errors_against(days, expected).iter().enumerate() {
-                assert!(*error < 2e-4, "body {} off by {error:e} AU after {days} days", i + 1);
+            for (i, error) in angle_errors_against(days, expected).iter().enumerate() {
+                let limit = if i + 1 == MOON { 0.3 * 3600.0 * arcsec } else { 0.05 * arcsec };
+                assert!(*error < limit, "body {} off by {:.3} arcsec after {days} days", i + 1, error / arcsec);
             }
         }
     }

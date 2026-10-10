@@ -99,10 +99,12 @@ async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
         for (i, line) in sim.hud().iter().enumerate() {
             draw_text(line, 20.0, 60.0 + 30.0 * i as f32, 28.0, WHITE);
         }
+        // Bottom-left status, bottom-right FPS: both follow the window size.
+        let bottom = screen_height() - 20.0;
         if finished {
-            draw_text("FINISHED - press SPACE to restart", 20.0, 580.0, 28.0, YELLOW);
+            draw_text("FINISHED - press SPACE to restart", 20.0, bottom, 28.0, YELLOW);
         } else if paused {
-            draw_text("PAUSED - press SPACE", 20.0, 580.0, 28.0, YELLOW);
+            draw_text("PAUSED - press SPACE", 20.0, bottom, 28.0, YELLOW);
         }
         fps_frames += 1;
         fps_elapsed += get_frame_time();
@@ -114,7 +116,7 @@ async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
         }
         let fps = format!("{fps} FPS");
         let size = measure_text(&fps, None, 24, 1.0);
-        draw_text(&fps, screen_width() - size.width - 20.0, screen_height() - 20.0, 24.0, GRAY);
+        draw_text(&fps, screen_width() - size.width - 20.0, bottom, 24.0, GRAY);
         next_frame().await;
     }
 }

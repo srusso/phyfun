@@ -18,14 +18,18 @@ const MAX_SPEED: f64 = START_SPEED * 32.0;
 // Drawing. See `to_display` for how AU map to the screen.
 const STAR_RADIUS: f32 = 0.25;
 const PLANET_RADIUS: f32 = 0.09;
+const MOON_RADIUS: f32 = 0.05;
+/// The Moon is only 0.0026 AU from Earth, which would sit on top of it. Its offset from Earth is
+/// drawn this many times larger (it is not subject to the sqrt scaling of the planets' orbits).
+const MOON_EXAGGERATION: f64 = 100.0;
 const TRAIL_WIDTH: f32 = 0.03;
 /// A trail point is added each time a planet has moved this far around the star (rad)...
 const TRAIL_ANGLE: f64 = 0.05;
 /// ...and the trail keeps the last ~2*pi rad, i.e. roughly one orbit.
 const TRAIL_LEN: usize = 130;
 
-/// Orbital elements at J2000 (Standish, JPL "Keplerian elements for approximate positions"),
-/// reduced to the plane of the ecliptic: orbits are 2D here, so inclination is ignored.
+/// Orbital elements at J2000 (planets: Standish, JPL "Keplerian elements for approximate
+/// positions"), reduced to the plane of the ecliptic: orbits are 2D here, so inclination is ignored.
 struct Elements {
     /// Mass in solar masses.
     m: f64,
@@ -35,7 +39,7 @@ struct Elements {
     e: f64,
     /// Mean longitude at J2000, degrees.
     mean_longitude: f64,
-    /// Longitude of perihelion at J2000, degrees.
+    /// Longitude of perihelion (perigee for the Moon) at J2000, degrees.
     perihelion: f64,
     color: Color,
 }
@@ -45,7 +49,7 @@ const STAR_MASS: f64 = 1.0;
 const PLANETS: [Elements; 8] = [
     Elements { m: 1.6601e-7, a: 0.38710, e: 0.20563, mean_longitude: 252.25, perihelion: 77.46, color: LIGHTGRAY }, // Mercury
     Elements { m: 2.4478e-6, a: 0.72333, e: 0.00677, mean_longitude: 181.98, perihelion: 131.53, color: BEIGE }, // Venus
-    // Earth's mass includes the Moon, since a = 1 AU is the orbit of the Earth-Moon barycenter.
+    // The Earth-Moon system: a = 1 AU is the orbit of its barycenter. It is split into Earth and Moon.
     Elements { m: 3.0404e-6, a: 1.00000, e: 0.01671, mean_longitude: 100.46, perihelion: 102.94, color: GREEN }, // Earth
     Elements { m: 3.2272e-7, a: 1.52368, e: 0.09340, mean_longitude: 355.45, perihelion: 336.04, color: RED }, // Mars
     Elements { m: 9.5479e-4, a: 5.20260, e: 0.04839, mean_longitude: 34.40, perihelion: 14.75, color: ORANGE }, // Jupiter
@@ -54,17 +58,26 @@ const PLANETS: [Elements; 8] = [
     Elements { m: 5.1514e-5, a: 30.11040, e: 0.00899, mean_longitude: 304.88, perihelion: 44.97, color: VIOLET }, // Neptune
 ];
 
+/// Index in `PLANETS` of the Earth-Moon system.
+const EARTH: usize = 2;
+
+/// The Moon's orbit around Earth (geocentric elements, JPL/Meeus).
+const MOON: Elements = Elements { m: 3.694e-8, a: 0.00257, e: 0.0549, mean_longitude: 218.32, perihelion: 83.35, color: WHITE };
+
 struct Body {
     pos: DVec2,
     v: DVec2,
     a: DVec2,
     m: f64,
     color: Color,
-    /// Recent positions relative to the star, for drawing. Empty for the star itself.
+    radius: f32,
+    /// Index of the body this one orbits (the star for planets, Earth for the Moon).
+    center: usize,
+    /// Recent positions relative to `center`, for drawing. Empty for the star itself.
     trail: VecDeque<DVec2>,
 }
 
-/// The Sun and the eight planets, all attracting each other (Newtonian N-body).
+/// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body).
 pub struct Planets {
     /// The star is `bodies[0]`.
     bodies: Vec<Body>,
@@ -74,10 +87,11 @@ pub struct Planets {
     t: f64,
 }
 
-/// Position and velocity of a planet relative to the star, from its orbital elements.
-fn initial_state(planet: &Elements) -> (DVec2, DVec2) {
-    let (e, a) = (planet.e, planet.a);
-    let mean_anomaly = (planet.mean_longitude - planet.perihelion).to_radians();
+/// Position and velocity relative to the body orbited, from orbital elements.
+/// `mu` is G times the sum of the two masses.
+fn initial_state(mu: f64, orbit: &Elements) -> (DVec2, DVec2) {
+    let (e, a) = (orbit.e, orbit.a);
+    let mean_anomaly = (orbit.mean_longitude - orbit.perihelion).to_radians();
 
     // Kepler's equation M = E - e sin(E), by Newton iteration.
     let mut big_e = mean_anomaly;
@@ -87,14 +101,13 @@ fn initial_state(planet: &Elements) -> (DVec2, DVec2) {
 
     // In the orbit's own frame, with perihelion along +x (counter-clockwise motion).
     let r = a * (1.0 - e * big_e.cos());
-    let mu = G * (STAR_MASS + planet.m);
     let k = (mu * a).sqrt() / r;
     let b = (1.0 - e * e).sqrt();
     let pos = dvec2(a * (big_e.cos() - e), a * b * big_e.sin());
     let v = dvec2(-k * big_e.sin(), k * b * big_e.cos());
 
     // Rotate so perihelion points along its longitude.
-    let rotation = DMat2::from_angle(planet.perihelion.to_radians());
+    let rotation = DMat2::from_angle(orbit.perihelion.to_radians());
     (rotation * pos, rotation * v)
 }
 
@@ -106,14 +119,37 @@ impl Planets {
             a: DVec2::ZERO,
             m: STAR_MASS,
             color: YELLOW,
+            radius: STAR_RADIUS,
+            center: 0,
             trail: VecDeque::new(),
         }];
         for planet in &PLANETS {
-            let (pos, v) = initial_state(planet);
-            bodies.push(Body { pos, v, a: DVec2::ZERO, m: planet.m, color: planet.color, trail: VecDeque::new() });
+            let (pos, v) = initial_state(G * (STAR_MASS + planet.m), planet);
+            let (m, color, radius) = (planet.m, planet.color, PLANET_RADIUS);
+            bodies.push(Body { pos, v, a: DVec2::ZERO, m, color, radius, center: 0, trail: VecDeque::new() });
         }
 
-        // The planets were set up relative to a star at rest, which leaves the system with net
+        // The Earth-Moon system's barycenter follows the orbit above; put Earth and the Moon
+        // around it, at the Moon's orbit about Earth.
+        let earth = EARTH + 1; // bodies[0] is the star
+        let system_m = bodies[earth].m;
+        let (rel_pos, rel_v) = initial_state(G * system_m, &MOON);
+        let (moon_share, earth_share) = (MOON.m / system_m, 1.0 - MOON.m / system_m);
+        bodies.push(Body {
+            pos: bodies[earth].pos + rel_pos * earth_share,
+            v: bodies[earth].v + rel_v * earth_share,
+            a: DVec2::ZERO,
+            m: MOON.m,
+            color: MOON.color,
+            radius: MOON_RADIUS,
+            center: earth,
+            trail: VecDeque::new(),
+        });
+        bodies[earth].pos -= rel_pos * moon_share;
+        bodies[earth].v -= rel_v * moon_share;
+        bodies[earth].m = system_m - MOON.m;
+
+        // The bodies were set up relative to a star at rest, which leaves the system with net
         // momentum. Move to the center-of-mass frame so the star wobbles instead of drifting away.
         let total_m: f64 = bodies.iter().map(|body| body.m).sum();
         let center: DVec2 = bodies.iter().map(|body| body.m * body.pos).sum::<DVec2>() / total_m;
@@ -170,6 +206,18 @@ fn to_display(rel: DVec2) -> Vec2 {
     (rel.normalize_or_zero() * rel.length().sqrt()).as_vec2()
 }
 
+impl Planets {
+    /// Drawing coordinates of a point given relative to the body `center`.
+    fn display_point(&self, center: usize, rel: DVec2) -> Vec2 {
+        let star = self.bodies[0].pos;
+        if center == 0 {
+            return to_display(rel);
+        }
+        // Around a planet (the Moon): exaggerated offset from the planet's drawn position.
+        to_display(self.bodies[center].pos - star) + (rel * MOON_EXAGGERATION).as_vec2()
+    }
+}
+
 impl Simulation for Planets {
     fn step(&mut self, dt: f64) {
         // Velocity Verlet (kick-drift-kick): second order, symplectic, one force evaluation.
@@ -183,10 +231,10 @@ impl Simulation for Planets {
         }
         self.t += dt;
 
-        // Trails are sampled by angle around the star, so every planet shows about one orbit.
-        let star = self.bodies[0].pos;
+        // Trails are sampled by angle around the body orbited, so each shows about one orbit.
+        let centers: Vec<DVec2> = self.bodies.iter().map(|body| body.pos).collect();
         for body in &mut self.bodies[1..] {
-            let rel = body.pos - star;
+            let rel = body.pos - centers[body.center];
             let moved = match body.trail.back() {
                 Some(last) => (rel.to_angle() - last.to_angle() + std::f64::consts::PI)
                     .rem_euclid(std::f64::consts::TAU)
@@ -230,20 +278,20 @@ impl Simulation for Planets {
 
     fn draw(&self) {
         // Everything is drawn relative to the star, so the star itself stays in the middle.
-        let star = self.bodies[0].pos;
         draw_circle(0.0, 0.0, STAR_RADIUS, YELLOW);
 
         for body in &self.bodies[1..] {
-            // Trail: fade from transparent to the planet's color.
+            // Trail: fade from transparent to the body's color.
             let n = body.trail.len();
             for (i, (p0, p1)) in body.trail.iter().zip(body.trail.iter().skip(1)).enumerate() {
                 let alpha = (i as f32 + 1.0) / n as f32;
                 let c = Color::new(body.color.r, body.color.g, body.color.b, alpha * 0.8);
-                let (p0, p1) = (to_display(*p0), to_display(*p1));
+                let (p0, p1) = (self.display_point(body.center, *p0), self.display_point(body.center, *p1));
                 draw_line(p0.x, p0.y, p1.x, p1.y, TRAIL_WIDTH, c);
             }
-            let p = to_display(body.pos - star);
-            draw_circle(p.x, p.y, PLANET_RADIUS, body.color);
+            let rel = body.pos - self.bodies[body.center].pos;
+            let p = self.display_point(body.center, rel);
+            draw_circle(p.x, p.y, body.radius, body.color);
         }
     }
 
@@ -252,7 +300,7 @@ impl Simulation for Planets {
             format!("t = {:.1} yr   speed = {:.2} yr/s (UP/DOWN)", self.t, self.speed),
             format!("energy drift = {:+.1e}", (self.energy() - self.energy0) / self.energy0.abs()),
             format!("|momentum| = {:.1e} Msun AU/yr", self.momentum().length()),
-            "radial distances shown as sqrt(AU)".to_string(),
+            "distances: sqrt(AU) from the Sun; Moon-Earth x100".to_string(),
         ]
     }
 }
@@ -273,6 +321,19 @@ mod tests {
         let drift = (planets.energy() - planets.energy0) / planets.energy0.abs();
         assert!(drift.abs() < 1e-6, "energy drift {drift}");
         assert!(planets.momentum().length() < 1e-12, "momentum {}", planets.momentum().length());
+    }
+
+    #[test]
+    fn moon_stays_in_orbit_around_earth() {
+        let mut planets = Planets::new();
+        let moon = planets.bodies.len() - 1;
+        let earth = EARTH + 1;
+        // Lunar distance is 0.0024-0.0027 AU in reality (perigee-apogee); allow some margin.
+        for _ in 0..(5.0 / DT) as usize {
+            planets.step(DT);
+            let d = (planets.bodies[moon].pos - planets.bodies[earth].pos).length();
+            assert!(d > 0.0022 && d < 0.0029, "Moon-Earth distance {d} AU");
+        }
     }
 
     #[test]

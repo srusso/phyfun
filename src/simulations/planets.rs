@@ -4,9 +4,14 @@ use macroquad::prelude::*;
 
 use crate::simulation::Simulation;
 
-/// Units: distance in AU, time in years, mass in solar masses.
-/// In these units G * (1 solar mass) = 4 pi^2 (Earth's orbit has a = 1 AU, T = 1 yr).
-const G: f64 = 4.0 * std::f64::consts::PI * std::f64::consts::PI;
+// Units: distance in AU, time in Julian years (365.25 days), mass in solar masses.
+const AU_KM: f64 = 149_597_870.7;
+const YEAR_S: f64 = 365.25 * 86_400.0;
+const SUN_GM: f64 = 132_712_440_041.939_38; // km^3/s^2
+/// G * (1 solar mass) in AU^3/yr^2, so with masses in solar masses `G` is the usual constant.
+/// This is close to 4 pi^2 but not equal: the real Earth year isn't exactly 1 Julian year.
+const G: f64 = SUN_GM * YEAR_S * YEAR_S / (AU_KM * AU_KM * AU_KM);
+const DAYS_PER_YEAR: f64 = 365.25;
 
 /// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit, and
 /// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves positions accurate to
@@ -22,6 +27,7 @@ const YOSHIDA6: [f64; 7] = {
     const W0: f64 = 1.0 - 2.0 * (W1 + W2 + W3);
     [W3, W2, W1, W0, W1, W2, W3]
 };
+
 /// Simulated years per second of real time at the start; adjustable with UP/DOWN.
 const START_SPEED: f64 = 0.5;
 const MIN_SPEED: f64 = START_SPEED / 16.0;
@@ -31,143 +37,103 @@ const MAX_SPEED: f64 = START_SPEED * 32.0;
 const STAR_RADIUS: f32 = 0.25;
 const PLANET_RADIUS: f32 = 0.09;
 const MOON_RADIUS: f32 = 0.05;
+const TRAIL_WIDTH: f32 = 0.03;
 /// The Moon is only 0.0026 AU from Earth, which would sit on top of it. Its offset from Earth is
 /// drawn this many times larger (it is not subject to the sqrt scaling of the planets' orbits).
 const MOON_EXAGGERATION: f64 = 100.0;
-const TRAIL_WIDTH: f32 = 0.03;
-/// A trail point is added each time a planet has moved this far around the star (rad)...
+/// A trail point is added each time a body has moved this far around the one it orbits (rad)...
 const TRAIL_ANGLE: f64 = 0.05;
 /// ...and the trail keeps the last ~2*pi rad, i.e. roughly one orbit.
 const TRAIL_LEN: usize = 130;
 
-/// Orbital elements at J2000 (planets: Standish, JPL "Keplerian elements for approximate
-/// positions"), reduced to the plane of the ecliptic: orbits are 2D here, so inclination is ignored.
-struct Elements {
-    /// Mass in solar masses.
-    m: f64,
-    /// Semi-major axis, AU.
-    a: f64,
-    /// Eccentricity.
-    e: f64,
-    /// Mean longitude at J2000, degrees.
-    mean_longitude: f64,
-    /// Longitude of perihelion (perigee for the Moon) at J2000, degrees.
-    perihelion: f64,
+/// Initial state of a body, from JPL Horizons (DE441 ephemeris) at J2000: 2000-01-01 12:00 TDB.
+/// Positions and velocities are relative to the solar system barycenter, in the ecliptic frame.
+/// Mars and the giant planets are the barycenters of their systems (planet plus moons), with the
+/// mass of the whole system, so their moons are accounted for without simulating them.
+struct Start {
+    /// G times mass, km^3/s^2 (JPL's DE440/441 values).
+    gm: f64,
+    /// AU.
+    pos: [f64; 3],
+    /// AU/day.
+    v: [f64; 3],
+    /// Index in `START` of the body this one is drawn around (the Sun, or Earth for the Moon).
+    center: usize,
     color: Color,
 }
 
-const STAR_MASS: f64 = 1.0;
+const EARTH: usize = 3;
+const MOON: usize = 9;
 
-const PLANETS: [Elements; 8] = [
-    Elements { m: 1.6601e-7, a: 0.38710, e: 0.20563, mean_longitude: 252.25, perihelion: 77.46, color: LIGHTGRAY }, // Mercury
-    Elements { m: 2.4478e-6, a: 0.72333, e: 0.00677, mean_longitude: 181.98, perihelion: 131.53, color: BEIGE }, // Venus
-    // The Earth-Moon system: a = 1 AU is the orbit of its barycenter. It is split into Earth and Moon.
-    Elements { m: 3.0404e-6, a: 1.00000, e: 0.01671, mean_longitude: 100.46, perihelion: 102.94, color: GREEN }, // Earth
-    Elements { m: 3.2272e-7, a: 1.52368, e: 0.09340, mean_longitude: 355.45, perihelion: 336.04, color: RED }, // Mars
-    Elements { m: 9.5479e-4, a: 5.20260, e: 0.04839, mean_longitude: 34.40, perihelion: 14.75, color: ORANGE }, // Jupiter
-    Elements { m: 2.8589e-4, a: 9.55490, e: 0.05551, mean_longitude: 49.94, perihelion: 92.43, color: GOLD }, // Saturn
-    Elements { m: 4.3662e-5, a: 19.21840, e: 0.04630, mean_longitude: 313.23, perihelion: 170.96, color: SKYBLUE }, // Uranus
-    Elements { m: 5.1514e-5, a: 30.11040, e: 0.00899, mean_longitude: 304.88, perihelion: 44.97, color: VIOLET }, // Neptune
+/// The Sun, the eight planets and the Moon, at the indices above.
+const START: [Start; 10] = [
+    Start { gm: 132712440041.93938, pos: [-0.007137179161607904, -0.002795997495567612, 0.0002062985061910257], v: [5.378460339618783e-06, -7.406916207973516e-06, -9.43429343213747e-08], center: 0, color: YELLOW }, // Sun
+    Start { gm: 22031.868551, pos: [-0.1372307845370601, -0.450083615630924, -0.02439200845186075], v: [0.02137177412835578, -0.006455396660044872, -0.002487957757771483], center: 0, color: LIGHTGRAY }, // Mercury
+    Start { gm: 324858.592, pos: [-0.725439475506997, -0.03545030569537367, 0.04122048053303724], v: [0.0008034959761149407, -0.02030262561844178, -0.0003235458586621571], center: 0, color: BEIGE }, // Venus
+    Start { gm: 398600.435436, pos: [-0.1842722784343177, 0.964445689270963, 0.0002022132246085051], v: [-0.01720224660838933, -0.003166189060532839, 1.064592514002072e-08], center: 0, color: GREEN }, // Earth
+    Start { gm: 42828.375816, pos: [1.383578742584679, -0.01621231564790753, -0.03426136426966323], v: [0.0006768779813732038, 0.01517984117494233, 0.0003015574196696519], center: 0, color: RED }, // Mars
+    Start { gm: 126712764.8, pos: [3.994039981964449, 2.935780109470535, -0.1015789781275531], v: [-0.004562935066413099, 0.006435799094013335, 7.548517732342305e-05], center: 0, color: ORANGE }, // Jupiter
+    Start { gm: 37940585.2, pos: [6.399271680371201, 6.567193619416989, -0.3688701277386623], v: [-0.004286973413503631, 0.003882908781806891, 0.0001028535064646593], center: 0, color: GOLD }, // Saturn
+    Start { gm: 5794556.4, pos: [14.42471943522018, -13.73711746626653, -0.2379353892930592], v: [0.002683484051759769, 0.002665288979504713, -2.486640648937235e-05], center: 0, color: SKYBLUE }, // Uranus
+    Start { gm: 6836527.1, pos: [16.80490978889128, -24.99455888678026, 0.1274291784264387], v: [0.002584652719387356, 0.001769493903808153, -9.600395792023743e-05], center: 0, color: VIOLET }, // Neptune
+    Start { gm: 4902.800066, pos: [-0.1862215600840044, 0.9626075632308897, 0.000444671198490556], v: [-0.01683057613107253, -0.003588367637063646, -6.634893538849906e-06], center: EARTH, color: WHITE }, // Moon
 ];
 
-/// Index in `PLANETS` of the Earth-Moon system.
-const EARTH: usize = 2;
-
-/// The Moon's orbit around Earth (geocentric elements, JPL/Meeus). The semi-major axis is
-/// 0.00257 AU (384,400 km) on average, but slightly smaller here (a Kepler orbit's) so the
-/// period comes out at the real sidereal month, 27.3 days: the Sun's pull would otherwise stretch it.
-const MOON: Elements = Elements { m: 3.694e-8, a: 0.0025525, e: 0.0549, mean_longitude: 218.32, perihelion: 83.35, color: WHITE };
-
 struct Body {
-    pos: DVec2,
-    v: DVec2,
-    a: DVec2,
+    pos: DVec3,
+    v: DVec3,
+    a: DVec3,
     m: f64,
     color: Color,
     radius: f32,
-    /// Index of the body this one orbits (the star for planets, Earth for the Moon).
+    /// Index of the body this one orbits, for drawing (the Sun for planets, Earth for the Moon).
     center: usize,
-    /// Recent positions relative to `center`, for drawing. Empty for the star itself.
+    /// Recent positions relative to `center`, seen from above the ecliptic. Empty for the Sun.
     trail: VecDeque<DVec2>,
 }
 
 /// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body).
+/// Motion is 3D, so inclinations are real, but it is drawn from above the ecliptic.
 pub struct Planets {
-    /// The star is `bodies[0]`.
+    /// The Sun is `bodies[0]`.
     bodies: Vec<Body>,
     /// Total energy at the start, to measure drift against.
     energy0: f64,
     speed: f64,
+    /// Years since J2000.
     t: f64,
-}
-
-/// Position and velocity relative to the body orbited, from orbital elements.
-/// `mu` is G times the sum of the two masses.
-fn initial_state(mu: f64, orbit: &Elements) -> (DVec2, DVec2) {
-    let (e, a) = (orbit.e, orbit.a);
-    let mean_anomaly = (orbit.mean_longitude - orbit.perihelion).to_radians();
-
-    // Kepler's equation M = E - e sin(E), by Newton iteration.
-    let mut big_e = mean_anomaly;
-    for _ in 0..20 {
-        big_e -= (big_e - e * big_e.sin() - mean_anomaly) / (1.0 - e * big_e.cos());
-    }
-
-    // In the orbit's own frame, with perihelion along +x (counter-clockwise motion).
-    let r = a * (1.0 - e * big_e.cos());
-    let k = (mu * a).sqrt() / r;
-    let b = (1.0 - e * e).sqrt();
-    let pos = dvec2(a * (big_e.cos() - e), a * b * big_e.sin());
-    let v = dvec2(-k * big_e.sin(), k * b * big_e.cos());
-
-    // Rotate so perihelion points along its longitude.
-    let rotation = DMat2::from_angle(orbit.perihelion.to_radians());
-    (rotation * pos, rotation * v)
 }
 
 impl Planets {
     pub fn new() -> Self {
-        let mut bodies = vec![Body {
-            pos: DVec2::ZERO,
-            v: DVec2::ZERO,
-            a: DVec2::ZERO,
-            m: STAR_MASS,
-            color: YELLOW,
-            radius: STAR_RADIUS,
-            center: 0,
-            trail: VecDeque::new(),
-        }];
-        for planet in &PLANETS {
-            let (pos, v) = initial_state(G * (STAR_MASS + planet.m), planet);
-            let (m, color, radius) = (planet.m, planet.color, PLANET_RADIUS);
-            bodies.push(Body { pos, v, a: DVec2::ZERO, m, color, radius, center: 0, trail: VecDeque::new() });
-        }
+        let mut bodies: Vec<Body> = START
+            .iter()
+            .enumerate()
+            .map(|(i, start)| {
+                let radius = match i {
+                    0 => STAR_RADIUS,
+                    MOON => MOON_RADIUS,
+                    _ => PLANET_RADIUS,
+                };
+                Body {
+                    pos: DVec3::from(start.pos),
+                    v: DVec3::from(start.v) * DAYS_PER_YEAR,
+                    a: DVec3::ZERO,
+                    m: start.gm / SUN_GM,
+                    color: start.color,
+                    radius,
+                    center: start.center,
+                    trail: VecDeque::new(),
+                }
+            })
+            .collect();
 
-        // The Earth-Moon system's barycenter follows the orbit above; put Earth and the Moon
-        // around it, at the Moon's orbit about Earth.
-        let earth = EARTH + 1; // bodies[0] is the star
-        let system_m = bodies[earth].m;
-        let (rel_pos, rel_v) = initial_state(G * system_m, &MOON);
-        let (moon_share, earth_share) = (MOON.m / system_m, 1.0 - MOON.m / system_m);
-        bodies.push(Body {
-            pos: bodies[earth].pos + rel_pos * earth_share,
-            v: bodies[earth].v + rel_v * earth_share,
-            a: DVec2::ZERO,
-            m: MOON.m,
-            color: MOON.color,
-            radius: MOON_RADIUS,
-            center: earth,
-            trail: VecDeque::new(),
-        });
-        bodies[earth].pos -= rel_pos * moon_share;
-        bodies[earth].v -= rel_v * moon_share;
-        bodies[earth].m = system_m - MOON.m;
-
-        // The bodies were set up relative to a star at rest, which leaves the system with net
-        // momentum. Move to the center-of-mass frame so the star wobbles instead of drifting away.
+        // JPL's frame is centered on the real solar system's barycenter, which also counts the
+        // asteroids, Pluto and so on. Move to the center of mass of the bodies simulated here, so
+        // that total momentum is exactly zero and the Sun's wobble doesn't drift away.
         let total_m: f64 = bodies.iter().map(|body| body.m).sum();
-        let center: DVec2 = bodies.iter().map(|body| body.m * body.pos).sum::<DVec2>() / total_m;
-        let drift: DVec2 = bodies.iter().map(|body| body.m * body.v).sum::<DVec2>() / total_m;
+        let center: DVec3 = bodies.iter().map(|body| body.m * body.pos).sum::<DVec3>() / total_m;
+        let drift: DVec3 = bodies.iter().map(|body| body.m * body.v).sum::<DVec3>() / total_m;
         for body in &mut bodies {
             body.pos -= center;
             body.v -= drift;
@@ -182,7 +148,7 @@ impl Planets {
     /// Sets every body's acceleration from the gravity of all the others.
     fn update_accelerations(&mut self) {
         for body in &mut self.bodies {
-            body.a = DVec2::ZERO;
+            body.a = DVec3::ZERO;
         }
         for i in 0..self.bodies.len() {
             for j in (i + 1)..self.bodies.len() {
@@ -221,27 +187,25 @@ impl Planets {
     }
 
     /// Total momentum. Starts at zero in the center-of-mass frame and must stay there.
-    fn momentum(&self) -> DVec2 {
+    fn momentum(&self) -> DVec3 {
         self.bodies.iter().map(|body| body.m * body.v).sum()
     }
-}
 
-/// Maps a position relative to the star (AU) to drawing coordinates. The radius is square-rooted,
-/// since drawing Mercury (0.39 AU) and Neptune (30 AU) to scale won't fit on one screen.
-fn to_display(rel: DVec2) -> Vec2 {
-    (rel.normalize_or_zero() * rel.length().sqrt()).as_vec2()
-}
-
-impl Planets {
-    /// Drawing coordinates of a point given relative to the body `center`.
+    /// Drawing coordinates of a point given (seen from above) relative to the body `center`.
     fn display_point(&self, center: usize, rel: DVec2) -> Vec2 {
-        let star = self.bodies[0].pos;
         if center == 0 {
             return to_display(rel);
         }
         // Around a planet (the Moon): exaggerated offset from the planet's drawn position.
-        to_display(self.bodies[center].pos - star) + (rel * MOON_EXAGGERATION).as_vec2()
+        let planet = (self.bodies[center].pos - self.bodies[0].pos).truncate();
+        to_display(planet) + (rel * MOON_EXAGGERATION).as_vec2()
     }
+}
+
+/// Maps a position relative to the Sun (AU) to drawing coordinates. The radius is square-rooted,
+/// since drawing Mercury (0.39 AU) and Neptune (30 AU) to scale won't fit on one screen.
+fn to_display(rel: DVec2) -> Vec2 {
+    (rel.normalize_or_zero() * rel.length().sqrt()).as_vec2()
 }
 
 impl Simulation for Planets {
@@ -252,9 +216,9 @@ impl Simulation for Planets {
         self.t += dt;
 
         // Trails are sampled by angle around the body orbited, so each shows about one orbit.
-        let centers: Vec<DVec2> = self.bodies.iter().map(|body| body.pos).collect();
+        let centers: Vec<DVec3> = self.bodies.iter().map(|body| body.pos).collect();
         for body in &mut self.bodies[1..] {
-            let rel = body.pos - centers[body.center];
+            let rel = (body.pos - centers[body.center]).truncate();
             let moved = match body.trail.back() {
                 Some(last) => (rel.to_angle() - last.to_angle() + std::f64::consts::PI)
                     .rem_euclid(std::f64::consts::TAU)
@@ -297,7 +261,7 @@ impl Simulation for Planets {
     }
 
     fn draw(&self) {
-        // Everything is drawn relative to the star, so the star itself stays in the middle.
+        // Everything is drawn relative to the Sun, so the Sun itself stays in the middle.
         draw_circle(0.0, 0.0, STAR_RADIUS, YELLOW);
 
         for body in &self.bodies[1..] {
@@ -309,7 +273,7 @@ impl Simulation for Planets {
                 let (p0, p1) = (self.display_point(body.center, *p0), self.display_point(body.center, *p1));
                 draw_line(p0.x, p0.y, p1.x, p1.y, TRAIL_WIDTH, c);
             }
-            let rel = body.pos - self.bodies[body.center].pos;
+            let rel = (body.pos - self.bodies[body.center].pos).truncate();
             let p = self.display_point(body.center, rel);
             draw_circle(p.x, p.y, body.radius, body.color);
         }
@@ -317,7 +281,7 @@ impl Simulation for Planets {
 
     fn hud(&self) -> Vec<String> {
         vec![
-            format!("t = {:.1} yr   speed = {:.2} yr/s (UP/DOWN)", self.t, self.speed),
+            format!("year {:.2}   speed = {:.2} yr/s (UP/DOWN)", 2000.0 + self.t, self.speed),
             format!("energy drift = {:+.1e}", (self.energy() - self.energy0) / self.energy0.abs()),
             format!("|momentum| = {:.1e} Msun AU/yr", self.momentum().length()),
             "distances: sqrt(AU) from the Sun; Moon-Earth x100".to_string(),
@@ -328,6 +292,17 @@ impl Simulation for Planets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Positions after `years` of simulated time using steps of `dt`.
+    fn positions_after(years: f64, dt: f64) -> Vec<DVec3> {
+        let mut planets = Planets::new();
+        let steps = (years / dt).floor();
+        for _ in 0..steps as usize {
+            planets.step(dt);
+        }
+        planets.step(years - steps * dt); // the remainder, so we end at exactly `years`
+        planets.bodies.iter().map(|body| body.pos).collect()
+    }
 
     #[test]
     fn conserves_energy_and_momentum() {
@@ -346,23 +321,12 @@ mod tests {
     #[test]
     fn moon_stays_in_orbit_around_earth() {
         let mut planets = Planets::new();
-        let moon = planets.bodies.len() - 1;
-        let earth = EARTH + 1;
         // Lunar distance is 0.0024-0.0027 AU in reality (perigee-apogee); allow some margin.
         for _ in 0..(5.0 / DT) as usize {
             planets.step(DT);
-            let d = (planets.bodies[moon].pos - planets.bodies[earth].pos).length();
+            let d = (planets.bodies[MOON].pos - planets.bodies[EARTH].pos).length();
             assert!(d > 0.0022 && d < 0.0029, "Moon-Earth distance {d} AU");
         }
-    }
-
-    /// Positions after `years` of simulated time using steps of `dt`.
-    fn positions_after(years: f64, dt: f64) -> Vec<DVec2> {
-        let mut planets = Planets::new();
-        for _ in 0..(years / dt).round() as usize {
-            planets.step(dt);
-        }
-        planets.bodies.iter().map(|body| body.pos).collect()
     }
 
     #[test]
@@ -384,14 +348,71 @@ mod tests {
         }
     }
 
+    /// Positions of the planets and Moon relative to the Sun on 2050-01-01 12:00 TDB, from JPL Horizons.
+    const HORIZONS_2050: [[f64; 3]; 9] = [
+    [-0.19383887495353835, 0.2602374876728299, 0.03904203706874512], // Mercury
+    [0.15161930466081194, -0.7113792666797559, -0.01856539064507374], // Venus
+    [-0.18021419476575784, 0.9666841679689496, -0.00010945166455960886], // Earth
+    [-1.5407874533325585, -0.509637674924416, 0.02701532942919058], // Mars
+    [-2.3944545677412465, 4.6625244775693435, 0.034048340533462694], // Jupiter
+    [4.768522500057428, -8.772394871483622, -0.03799131630296051], // Saturn
+    [-17.823691404915362, 4.069472222215995, 0.24584878419787667], // Uranus
+    [17.39691254047843, 24.19870912325753, -0.8992312613560624], // Neptune
+    [-0.17790332795530533, 0.967745484807643, 1.973134179726551e-05], // Moon
+    ];
+    /// Same, on 2100-01-01 12:00 TDB.
+    const HORIZONS_2100: [[f64; 3]; 9] = [
+    [0.24751127983976062, -0.34788594901896175, -0.051118551807743585], // Mercury
+    [0.6842480981278593, 0.2373629026651644, -0.036129345730427836], // Venus
+    [-0.16603049156302818, 0.9692335221873367, -0.0002173730604088772], // Earth
+    [0.603509860529159, 1.3841620865187276, 0.01434486121199327], // Mars
+    [-5.373175933860913, -0.9120303811118975, 0.1238895958580123], // Jupiter
+    [-9.152346961525364, -3.0816461612304074, 0.4182562731062589], // Saturn
+    [18.864412332247717, 6.55067331750316, -0.2196427851129807], // Uranus
+    [-29.059666113569605, 8.233668973110179, 0.5002350894643763], // Neptune
+    [-0.16840341577891968, 0.969958343450389, -0.00019673126888694001], // Moon
+    ];
+
+    /// Distance (AU) between the simulated positions relative to the Sun after `days` and JPL's.
+    fn errors_against(days: f64, expected: &[[f64; 3]; 9]) -> Vec<f64> {
+        let pos = positions_after(days / DAYS_PER_YEAR, DT);
+        (1..10)
+            .map(|i| (pos[i] - pos[0] - DVec3::from(expected[i - 1])).length())
+            .collect()
+    }
+
     #[test]
-    fn planets_start_at_their_semi_major_axes() {
-        // Distance from the star should be within a(1 +- e) of the real orbit.
-        let planets = Planets::new();
-        for (body, planet) in planets.bodies[1..].iter().zip(&PLANETS) {
-            let r = (body.pos - planets.bodies[0].pos).length();
-            let (min, max) = (planet.a * (1.0 - planet.e), planet.a * (1.0 + planet.e));
-            assert!(r > min * 0.999 && r < max * 1.001, "a = {}: r = {r}", planet.a);
+    fn agrees_with_jpl_ephemeris() {
+        // Not exact: this model has no relativity (Mercury's perihelion advance is ~1e-4 AU per
+        // century), asteroids or Pluto. The errors are at most ~6e-5 AU (9,000 km).
+        for (days, expected) in [(18_263.0, &HORIZONS_2050), (36_525.0, &HORIZONS_2100)] {
+            for (i, error) in errors_against(days, expected).iter().enumerate() {
+                assert!(*error < 2e-4, "body {} off by {error:e} AU after {days} days", i + 1);
+            }
         }
+    }
+
+    #[test]
+    fn moon_period_is_the_sidereal_month() {
+        let mut planets = Planets::new();
+        let angle = |planets: &Planets| {
+            (planets.bodies[MOON].pos - planets.bodies[EARTH].pos).truncate().to_angle()
+        };
+        // Time the Moon takes to go around Earth: count passes through angle 0 going counter-clockwise.
+        let (mut last, mut passes, mut first_t, mut last_t) = (angle(&planets), 0, 0.0, 0.0);
+        for _ in 0..(20.0 / DT) as usize {
+            planets.step(DT);
+            let now = angle(&planets);
+            if last < 0.0 && now >= 0.0 && last > -1.0 {
+                passes += 1;
+                if passes == 1 {
+                    first_t = planets.t;
+                }
+                last_t = planets.t;
+            }
+            last = now;
+        }
+        let days = (last_t - first_t) / (passes - 1) as f64 * DAYS_PER_YEAR;
+        assert!((days - 27.3217).abs() < 0.02, "period {days} days");
     }
 }

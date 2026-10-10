@@ -61,8 +61,10 @@ const PLANETS: [Elements; 8] = [
 /// Index in `PLANETS` of the Earth-Moon system.
 const EARTH: usize = 2;
 
-/// The Moon's orbit around Earth (geocentric elements, JPL/Meeus).
-const MOON: Elements = Elements { m: 3.694e-8, a: 0.00257, e: 0.0549, mean_longitude: 218.32, perihelion: 83.35, color: WHITE };
+/// The Moon's orbit around Earth (geocentric elements, JPL/Meeus). The semi-major axis is
+/// 0.00257 AU (384,400 km) on average, but slightly smaller here (a Kepler orbit's) so the
+/// period comes out at the real sidereal month, 27.3 days: the Sun's pull would otherwise stretch it.
+const MOON: Elements = Elements { m: 3.694e-8, a: 0.002551, e: 0.0549, mean_longitude: 218.32, perihelion: 83.35, color: WHITE };
 
 struct Body {
     pos: DVec2,

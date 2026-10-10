@@ -8,8 +8,20 @@ use crate::simulation::Simulation;
 /// In these units G * (1 solar mass) = 4 pi^2 (Earth's orbit has a = 1 AU, T = 1 yr).
 const G: f64 = 4.0 * std::f64::consts::PI * std::f64::consts::PI;
 
-/// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit.
+/// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit, and
+/// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves positions accurate to
+/// ~1e-8 AU over a century, far below the errors of the model itself.
 const DT: f64 = 0.0005;
+
+/// Yoshida's sixth-order symplectic integrator (1990, solution A): one step is seven leapfrog
+/// steps of sizes `weight * dt`. The weights sum to 1, and the negative one steps backwards in time.
+const YOSHIDA6: [f64; 7] = {
+    const W1: f64 = -1.177_679_984_178_87;
+    const W2: f64 = 0.235_573_213_359_357;
+    const W3: f64 = 0.784_513_610_477_560;
+    const W0: f64 = 1.0 - 2.0 * (W1 + W2 + W3);
+    [W3, W2, W1, W0, W1, W2, W3]
+};
 /// Simulated years per second of real time at the start; adjustable with UP/DOWN.
 const START_SPEED: f64 = 0.5;
 const MIN_SPEED: f64 = START_SPEED / 16.0;
@@ -64,7 +76,7 @@ const EARTH: usize = 2;
 /// The Moon's orbit around Earth (geocentric elements, JPL/Meeus). The semi-major axis is
 /// 0.00257 AU (384,400 km) on average, but slightly smaller here (a Kepler orbit's) so the
 /// period comes out at the real sidereal month, 27.3 days: the Sun's pull would otherwise stretch it.
-const MOON: Elements = Elements { m: 3.694e-8, a: 0.002551, e: 0.0549, mean_longitude: 218.32, perihelion: 83.35, color: WHITE };
+const MOON: Elements = Elements { m: 3.694e-8, a: 0.0025525, e: 0.0549, mean_longitude: 218.32, perihelion: 83.35, color: WHITE };
 
 struct Body {
     pos: DVec2,
@@ -184,6 +196,18 @@ impl Planets {
         }
     }
 
+    /// One velocity Verlet (kick-drift-kick) step: second order, symplectic, one force evaluation.
+    fn leapfrog(&mut self, dt: f64) {
+        for body in &mut self.bodies {
+            body.v += body.a * (dt / 2.0);
+            body.pos += body.v * dt;
+        }
+        self.update_accelerations();
+        for body in &mut self.bodies {
+            body.v += body.a * (dt / 2.0);
+        }
+    }
+
     /// Kinetic plus gravitational potential energy.
     fn energy(&self) -> f64 {
         let mut e = 0.0;
@@ -222,14 +246,8 @@ impl Planets {
 
 impl Simulation for Planets {
     fn step(&mut self, dt: f64) {
-        // Velocity Verlet (kick-drift-kick): second order, symplectic, one force evaluation.
-        for body in &mut self.bodies {
-            body.v += body.a * (dt / 2.0);
-            body.pos += body.v * dt;
-        }
-        self.update_accelerations();
-        for body in &mut self.bodies {
-            body.v += body.a * (dt / 2.0);
+        for weight in YOSHIDA6 {
+            self.leapfrog(weight * dt);
         }
         self.t += dt;
 
@@ -321,7 +339,7 @@ mod tests {
             planets.step(DT);
         }
         let drift = (planets.energy() - planets.energy0) / planets.energy0.abs();
-        assert!(drift.abs() < 1e-6, "energy drift {drift}");
+        assert!(drift.abs() < 1e-11, "energy drift {drift}");
         assert!(planets.momentum().length() < 1e-12, "momentum {}", planets.momentum().length());
     }
 
@@ -335,6 +353,34 @@ mod tests {
             planets.step(DT);
             let d = (planets.bodies[moon].pos - planets.bodies[earth].pos).length();
             assert!(d > 0.0022 && d < 0.0029, "Moon-Earth distance {d} AU");
+        }
+    }
+
+    /// Positions after `years` of simulated time using steps of `dt`.
+    fn positions_after(years: f64, dt: f64) -> Vec<DVec2> {
+        let mut planets = Planets::new();
+        for _ in 0..(years / dt).round() as usize {
+            planets.step(dt);
+        }
+        planets.bodies.iter().map(|body| body.pos).collect()
+    }
+
+    #[test]
+    fn integrator_is_sixth_order() {
+        // Halving the step should shrink the error ~2^6 = 64 times. The error is measured against
+        // a run with a much smaller step, for Mars and Jupiter. Smaller errors than ~1e-12 AU would
+        // be rounding noise, so the step is large; Earth is left out because the Moon's orbit isn't
+        // resolved at this step.
+        let dt = 0.016;
+        let reference = positions_after(4.0, dt / 8.0);
+        let error = |dt: f64| {
+            let pos = positions_after(4.0, dt);
+            [4, 5].map(|i| (pos[i] - reference[i]).length())
+        };
+        let (coarse, fine) = (error(dt), error(dt / 2.0));
+        for (c, f) in coarse.iter().zip(&fine) {
+            let ratio = c / f;
+            assert!(ratio > 40.0 && ratio < 90.0, "error ratio {ratio} (errors {c:e} and {f:e})");
         }
     }
 

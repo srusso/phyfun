@@ -37,6 +37,13 @@ async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
     let mut paused = true; // start paused
     let mut lag = 0.0; // real time not yet simulated
 
+    // FPS shown on screen: frames counted over a window and refreshed when it ends.
+    // The first window is short so a value shows up almost immediately.
+    let mut fps = 0;
+    let mut fps_frames = 0;
+    let mut fps_elapsed = 0.0;
+    let mut fps_window = 0.1; // s
+
     loop {
         if is_key_pressed(KeyCode::Q) {
             return;
@@ -67,7 +74,15 @@ async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
         if paused {
             draw_text("PAUSED - press SPACE", 20.0, 580.0, 28.0, YELLOW);
         }
-        let fps = format!("{} FPS", get_fps());
+        fps_frames += 1;
+        fps_elapsed += get_frame_time();
+        if fps_elapsed >= fps_window {
+            fps = (fps_frames as f32 / fps_elapsed).round() as u32;
+            fps_frames = 0;
+            fps_elapsed = 0.0;
+            fps_window = 1.0; // then once per second
+        }
+        let fps = format!("{fps} FPS");
         let size = measure_text(&fps, None, 24, 1.0);
         draw_text(&fps, screen_width() - size.width - 20.0, screen_height() - 20.0, 24.0, GRAY);
         next_frame().await;

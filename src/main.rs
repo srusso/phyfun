@@ -48,6 +48,7 @@ fn camera_for(bounds: Rect) -> Camera2D {
 async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
     let mut sim = create();
     let mut paused = true; // start paused
+    let mut finished = false; // simulation is over; its final state stays on screen
     let mut lag = 0.0; // real time not yet simulated
 
     // FPS shown on screen: frames counted over a window and refreshed when it ends.
@@ -62,7 +63,14 @@ async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
             return;
         }
         if is_key_pressed(KeyCode::Space) {
-            paused = !paused;
+            if finished {
+                // Back to the initial state, paused.
+                sim = create();
+                finished = false;
+                lag = 0.0;
+            } else {
+                paused = !paused;
+            }
         }
 
         sim.handle_input();
@@ -74,14 +82,12 @@ async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
             while lag >= dt {
                 sim.step(dt);
                 lag -= dt;
+                if sim.is_over() {
+                    finished = true;
+                    paused = true;
+                    break;
+                }
             }
-        }
-
-        if sim.is_over() {
-            // Back to the initial state, paused.
-            sim = create();
-            paused = true;
-            lag = 0.0;
         }
 
         clear_background(BLACK);
@@ -93,7 +99,9 @@ async fn run(create: fn() -> Box<dyn Simulation>, title: String) {
         for (i, line) in sim.hud().iter().enumerate() {
             draw_text(line, 20.0, 60.0 + 30.0 * i as f32, 28.0, WHITE);
         }
-        if paused {
+        if finished {
+            draw_text("FINISHED - press SPACE to restart", 20.0, 580.0, 28.0, YELLOW);
+        } else if paused {
             draw_text("PAUSED - press SPACE", 20.0, 580.0, 28.0, YELLOW);
         }
         fps_frames += 1;

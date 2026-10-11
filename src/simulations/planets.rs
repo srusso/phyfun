@@ -15,12 +15,15 @@ const DAYS_PER_YEAR: f64 = 365.25;
 /// Speed of light in AU/yr (299792.458 km/s).
 const C: f64 = 299_792.458 * YEAR_S / AU_KM;
 
-/// Earth's oblateness (equatorial bulge), which pulls on the Moon: the J2 coefficient, the
-/// equatorial radius (km), and the axis tilt from the ecliptic (arcseconds). The axis is fixed:
-/// letting it precess changes the Moon by only ~1 km over a century.
-const EARTH_J2: f64 = 1.082_625_45e-3;
-const EARTH_RADIUS_KM: f64 = 6378.1363;
+/// Earth's oblateness (equatorial bulge), which pulls on the Moon: the J2 coefficient and the
+/// equatorial radius (km) from the DE441 header, the axis tilt from the ecliptic (arcseconds), and
+/// how far the axis precesses around the ecliptic's pole per century (arcseconds; IAU 2006
+/// precession on the fixed J2000 ecliptic, from memory). The precession moves the Moon by 0.3 km
+/// over a century.
+const EARTH_J2: f64 = 1.082_625_39e-3;
+const EARTH_RADIUS_KM: f64 = 6378.1366;
 const EARTH_TILT_ARCSEC: f64 = 84_381.448;
+const EARTH_PRECESSION_ARCSEC: f64 = 5038.481_507;
 
 /// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit, and
 /// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves positions accurate to
@@ -166,6 +169,14 @@ impl Planets {
         planets
     }
 
+    /// Direction of Earth's axis in the ecliptic frame. It is tilted by `EARTH_TILT_ARCSEC` and
+    /// turns about the ecliptic's pole (clockwise seen from above) by the precession since J2000.
+    fn earth_pole(&self) -> DVec3 {
+        let tilt = (EARTH_TILT_ARCSEC / 3600.0).to_radians();
+        let turned = (EARTH_PRECESSION_ARCSEC / 3600.0).to_radians() * self.t / 100.0;
+        dvec3(tilt.sin() * turned.sin(), tilt.sin() * turned.cos(), tilt.cos())
+    }
+
     /// Sets every body's acceleration from the gravity of all the others.
     fn update_accelerations(&mut self) {
         for body in &mut self.bodies {
@@ -185,8 +196,7 @@ impl Planets {
         // Extra pull of Earth's bulge on the Moon:
         //   a = -3/2 J2 G m_earth R^2 / r^5 * [(1 - 5 z^2 / r^2) r_vec + 2 z p],
         // with r_vec the Moon's position relative to Earth, p Earth's axis and z = r_vec . p.
-        let tilt = (EARTH_TILT_ARCSEC / 3600.0).to_radians();
-        let pole = dvec3(0.0, tilt.sin(), tilt.cos());
+        let pole = self.earth_pole();
         let radius = EARTH_RADIUS_KM / AU_KM;
         let (earth, moon) = (&self.bodies[EARTH], &self.bodies[MOON]);
         let rel = moon.pos - earth.pos;

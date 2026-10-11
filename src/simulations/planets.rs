@@ -54,18 +54,21 @@ const MOON_AXES_J2000: [[f64; 3]; 3] = [
 const MOON_SPIN_J2000: [f64; 3] = [2.214634475569498e-6, -6.601992575835387e-5, 0.2299934188760787];
 
 /// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit, and
-/// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves positions accurate to
-/// ~1e-8 AU over a century, far below the errors of the model itself.
+/// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves the planets accurate
+/// to ~1e-8 AU over a century, far below the errors of the model itself, and the Moon to ~0.4 km,
+/// which is mostly the integrator's own error now (halving the step gives 0.35 km).
 const DT: f64 = 0.0005;
 
-/// Yoshida's sixth-order symplectic integrator (1990, solution A): one step is seven leapfrog
-/// steps of sizes `weight * dt`. The weights sum to 1, and the negative one steps backwards in time.
-const YOSHIDA6: [f64; 7] = {
-    const W1: f64 = -1.177_679_984_178_87;
-    const W2: f64 = 0.235_573_213_359_357;
-    const W3: f64 = 0.784_513_610_477_560;
-    const W0: f64 = 1.0 - 2.0 * (W1 + W2 + W3);
-    [W3, W2, W1, W0, W1, W2, W3]
+/// Kahan and Li's sixth-order symplectic composition (1997, scheme s9odr6a): one step is nine
+/// leapfrog steps of sizes `weight * dt`. The weights sum to 1, and the negative one steps
+/// backwards in time. Ten times smaller error on the Moon than Yoshida's seven (1990) at the same step.
+const COMPOSITION6: [f64; 9] = {
+    const A: f64 = 0.392_161_444_007_314_14;
+    const B: f64 = 0.332_599_136_789_359_44;
+    const C: f64 = -0.706_246_172_557_639_4;
+    const D: f64 = 0.082_213_596_293_550_8;
+    const E: f64 = 1.0 - 2.0 * (A + B + C + D);
+    [A, B, C, D, E, D, C, B, A]
 };
 
 /// Simulated years per second of real time at the start; adjustable with UP/DOWN.
@@ -121,6 +124,8 @@ const START: [Start; 10] = [
 
 struct Body {
     pos: DVec3,
+    /// Rounding error of the last position update, for the compensated sum.
+    pos_lost: DVec3,
     v: DVec3,
     a: DVec3,
     m: f64,
@@ -169,6 +174,7 @@ impl Planets {
                 };
                 Body {
                     pos: DVec3::from(start.pos),
+                    pos_lost: DVec3::ZERO,
                     v: DVec3::from(start.v) * DAYS_PER_YEAR,
                     a: DVec3::ZERO,
                     m: start.gm / SUN_GM,
@@ -290,7 +296,12 @@ impl Planets {
     fn leapfrog(&mut self, dt: f64) {
         self.kick(dt / 2.0);
         for body in &mut self.bodies {
-            body.pos += body.v * dt;
+            // Compensated (Kahan) sum: `pos_lost` keeps what rounding dropped from `pos` and puts
+            // it back into the next step. Rounding scatter on the Moon falls from 0.26 to 0.02 km.
+            let step = body.v * dt - body.pos_lost;
+            let next = body.pos + step;
+            body.pos_lost = (next - body.pos) - step;
+            body.pos = next;
         }
         // The Moon's axes turn about its angular velocity (in the ecliptic frame) by |s| dt.
         let turn = DQuat::from_scaled_axis(self.moon_axes * self.moon_spin * dt);
@@ -462,10 +473,11 @@ fn to_display(rel: DVec2) -> Vec2 {
 
 impl Simulation for Planets {
     fn step(&mut self, dt: f64) {
-        // The slow accelerations are applied once at each end of the step, at second order; they
-        // are 1e-8 of the total, so that costs nothing visible and saves five sixths of the work.
+        // The slow accelerations (one costs as much as four Newtonian ones) are applied once at
+        // each end of the step, at second order; they are 1e-8 of the total, so that costs
+        // nothing visible.
         self.slow_kick(dt / 2.0);
-        for weight in YOSHIDA6 {
+        for weight in COMPOSITION6 {
             self.leapfrog(weight * dt);
         }
         self.slow_kick(dt / 2.0);
@@ -593,14 +605,14 @@ mod tests {
     #[test]
     fn integrator_is_sixth_order() {
         // Halving the step should shrink the error ~2^6 = 64 times. The error is measured against
-        // a run with a much smaller step, for Venus and Mars. Smaller errors than ~1e-12 AU would
-        // be rounding noise (as for Jupiter), so the step is large; Earth is left out because the
+        // a run with a much smaller step, for Mercury and Venus. Smaller errors than ~1e-12 AU would
+        // be rounding noise (as for Jupiter and Mars), so the step is large; Earth is left out because the
         // Moon's orbit isn't resolved at this step.
         let dt = 0.016;
         let reference = positions_after(4.0, dt / 8.0);
         let error = |dt: f64| {
             let pos = positions_after(4.0, dt);
-            [2, 4].map(|i| (pos[i] - reference[i]).length())
+            [1, 2].map(|i| (pos[i] - reference[i]).length())
         };
         let (coarse, fine) = (error(dt), error(dt / 2.0));
         for (c, f) in coarse.iter().zip(&fine) {
@@ -664,14 +676,14 @@ mod tests {
 
     #[test]
     fn agrees_with_jpl_ephemeris() {
-        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 1 arcsecond as seen
+        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 0.4 arcseconds as seen
         // from Earth, and its x and z axes within 0.1 degrees of JPL's. What is left is mostly what
         // the model leaves out: asteroids, Pluto, and friction inside the Moon.
         let arcsec = std::f64::consts::PI / 180.0 / 3600.0;
         for (days, expected, axes) in [(18_263.0, &HORIZONS_2050, MOON_AXES_2050), (36_525.0, &HORIZONS_2100, MOON_AXES_2100)] {
             let planets = simulate(days / DAYS_PER_YEAR, DT);
             for (i, error) in angle_errors_against(&planets, expected).iter().enumerate() {
-                let limit = if i + 1 == MOON { 1.0 * arcsec } else { 0.05 * arcsec };
+                let limit = if i + 1 == MOON { 0.4 * arcsec } else { 0.05 * arcsec };
                 assert!(*error < limit, "body {} off by {:.3} arcsec after {days} days", i + 1, error / arcsec);
             }
             for (i, expected) in axes.iter().enumerate() {

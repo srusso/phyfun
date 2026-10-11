@@ -6,6 +6,7 @@ mod galaxies;
 mod ising;
 mod planets;
 mod slope;
+mod wave_packet;
 mod top;
 
 use crate::simulation::Simulation;
@@ -28,6 +29,7 @@ pub const SIMULATIONS: &[Entry] = &[
     Entry { name: "top", create: || Box::new(top::Top::new()) },
     Entry { name: "galaxies", create: || Box::new(galaxies::Galaxies::new()) },
     Entry { name: "argon", create: || Box::new(argon::Argon::new()) },
+    Entry { name: "wavepacket", create: || Box::new(wave_packet::WavePacket::new()) },
 ];
 
 /// Finds a simulation by name (case-insensitive) or by number.

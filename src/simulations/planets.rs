@@ -7,7 +7,7 @@ use crate::simulation::Simulation;
 // Units: distance in AU, time in Julian years (365.25 days), mass in solar masses.
 const AU_KM: f64 = 149_597_870.7;
 const YEAR_S: f64 = 365.25 * 86_400.0;
-const SUN_GM: f64 = 132_712_440_041.939_38; // km^3/s^2
+const SUN_GM: f64 = 132_712_440_041.279_419; // km^3/s^2
 /// G * (1 solar mass) in AU^3/yr^2, so with masses in solar masses `G` is the usual constant.
 /// This is close to 4 pi^2 but not equal: the real Earth year isn't exactly 1 Julian year.
 const G: f64 = SUN_GM * YEAR_S * YEAR_S / (AU_KM * AU_KM * AU_KM);
@@ -76,16 +76,16 @@ const MOON: usize = 9;
 
 /// The Sun, the eight planets and the Moon, at the indices above.
 const START: [Start; 10] = [
-    Start { gm: 132712440041.93938, pos: [-0.007137179161607904, -0.002795997495567612, 0.0002062985061910257], v: [5.378460339618783e-06, -7.406916207973516e-06, -9.43429343213747e-08], center: 0, color: YELLOW }, // Sun
+    Start { gm: 132712440041.279419, pos: [-0.007137179161607904, -0.002795997495567612, 0.0002062985061910257], v: [5.378460339618783e-06, -7.406916207973516e-06, -9.43429343213747e-08], center: 0, color: YELLOW }, // Sun
     Start { gm: 22031.868551, pos: [-0.1372307845370601, -0.450083615630924, -0.02439200845186075], v: [0.02137177412835578, -0.006455396660044872, -0.002487957757771483], center: 0, color: LIGHTGRAY }, // Mercury
     Start { gm: 324858.592, pos: [-0.725439475506997, -0.03545030569537367, 0.04122048053303724], v: [0.0008034959761149407, -0.02030262561844178, -0.0003235458586621571], center: 0, color: BEIGE }, // Venus
-    Start { gm: 398600.435436, pos: [-0.1842722784343177, 0.964445689270963, 0.0002022132246085051], v: [-0.01720224660838933, -0.003166189060532839, 1.064592514002072e-08], center: 0, color: GREEN }, // Earth
+    Start { gm: 398600.435507, pos: [-0.1842722784343177, 0.964445689270963, 0.0002022132246085051], v: [-0.01720224660838933, -0.003166189060532839, 1.064592514002072e-08], center: 0, color: GREEN }, // Earth
     Start { gm: 42828.375816, pos: [1.383578742584679, -0.01621231564790753, -0.03426136426966323], v: [0.0006768779813732038, 0.01517984117494233, 0.0003015574196696519], center: 0, color: RED }, // Mars
-    Start { gm: 126712764.8, pos: [3.994039981964449, 2.935780109470535, -0.1015789781275531], v: [-0.004562935066413099, 0.006435799094013335, 7.548517732342305e-05], center: 0, color: ORANGE }, // Jupiter
-    Start { gm: 37940585.2, pos: [6.399271680371201, 6.567193619416989, -0.3688701277386623], v: [-0.004286973413503631, 0.003882908781806891, 0.0001028535064646593], center: 0, color: GOLD }, // Saturn
+    Start { gm: 126712764.1, pos: [3.994039981964449, 2.935780109470535, -0.1015789781275531], v: [-0.004562935066413099, 0.006435799094013335, 7.548517732342305e-05], center: 0, color: ORANGE }, // Jupiter
+    Start { gm: 37940584.8418, pos: [6.399271680371201, 6.567193619416989, -0.3688701277386623], v: [-0.004286973413503631, 0.003882908781806891, 0.0001028535064646593], center: 0, color: GOLD }, // Saturn
     Start { gm: 5794556.4, pos: [14.42471943522018, -13.73711746626653, -0.2379353892930592], v: [0.002683484051759769, 0.002665288979504713, -2.486640648937235e-05], center: 0, color: SKYBLUE }, // Uranus
-    Start { gm: 6836527.1, pos: [16.80490978889128, -24.99455888678026, 0.1274291784264387], v: [0.002584652719387356, 0.001769493903808153, -9.600395792023743e-05], center: 0, color: VIOLET }, // Neptune
-    Start { gm: 4902.800066, pos: [-0.1862215600840044, 0.9626075632308897, 0.000444671198490556], v: [-0.01683057613107253, -0.003588367637063646, -6.634893538849906e-06], center: EARTH, color: WHITE }, // Moon
+    Start { gm: 6836527.10058, pos: [16.80490978889128, -24.99455888678026, 0.1274291784264387], v: [0.002584652719387356, 0.001769493903808153, -9.600395792023743e-05], center: 0, color: VIOLET }, // Neptune
+    Start { gm: 4902.800118, pos: [-0.1862215600840044, 0.9626075632308897, 0.000444671198490556], v: [-0.01683057613107253, -0.003588367637063646, -6.634893538849906e-06], center: EARTH, color: WHITE }, // Moon
 ];
 
 struct Body {
@@ -361,15 +361,20 @@ impl Simulation for Planets {
 mod tests {
     use super::*;
 
-    /// Positions after `years` of simulated time using steps of `dt`.
-    fn positions_after(years: f64, dt: f64) -> Vec<DVec3> {
+    /// The system after `years` of simulated time using steps of `dt`.
+    fn simulate(years: f64, dt: f64) -> Planets {
         let mut planets = Planets::new();
         let steps = (years / dt).floor();
         for _ in 0..steps as usize {
             planets.step(dt);
         }
         planets.step(years - steps * dt); // the remainder, so we end at exactly `years`
-        planets.bodies.iter().map(|body| body.pos).collect()
+        planets
+    }
+
+    /// Positions after `years` of simulated time using steps of `dt`.
+    fn positions_after(years: f64, dt: f64) -> Vec<DVec3> {
+        simulate(years, dt).bodies.iter().map(|body| body.pos).collect()
     }
 
     #[test]

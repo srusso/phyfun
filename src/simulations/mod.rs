@@ -4,6 +4,7 @@ mod double_pendulum;
 mod ising;
 mod planets;
 mod slope;
+mod top;
 
 use crate::simulation::Simulation;
 
@@ -22,6 +23,7 @@ pub const SIMULATIONS: &[Entry] = &[
     Entry { name: "blackhole", create: || Box::new(blackhole::BlackHole::new()) },
     Entry { name: "ising", create: || Box::new(ising::Ising::new()) },
     Entry { name: "chain-reaction", create: || Box::new(chain_reaction::ChainReaction::new()) },
+    Entry { name: "top", create: || Box::new(top::Top::new()) },
 ];
 
 /// Finds a simulation by name (case-insensitive) or by number.

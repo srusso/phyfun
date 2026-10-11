@@ -8,11 +8,11 @@ fn main() {
     let Some(query) = std::env::args().nth(1) else {
         usage("missing simulation");
     };
-    let Some((number, entry)) = simulations::find(&query) else {
+    let Some((_number, entry)) = simulations::find(&query) else {
         usage(&format!("unknown simulation '{query}'"));
     };
 
-    let title = format!("phyfun - {number} {}", entry.name);
+    let title = format!("phyfun - {}", entry.name);
     let conf = Conf {
         window_title: title.clone(),
         window_width: 900,

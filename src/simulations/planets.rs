@@ -306,23 +306,6 @@ impl Simulation for Planets {
         false // runs indefinitely
     }
 
-    fn dt(&self) -> f64 {
-        DT
-    }
-
-    fn time_scale(&self) -> f64 {
-        self.speed
-    }
-
-    fn handle_input(&mut self) {
-        if is_key_pressed(KeyCode::Up) {
-            self.speed = (self.speed * 2.0).min(MAX_SPEED);
-        }
-        if is_key_pressed(KeyCode::Down) {
-            self.speed = (self.speed / 2.0).max(MIN_SPEED);
-        }
-    }
-
     fn world_bounds(&self) -> Rect {
         // Neptune is at sqrt(30) ~ 5.5 in display coordinates.
         Rect::new(-8.55, -5.7, 17.1, 11.4)
@@ -344,6 +327,23 @@ impl Simulation for Planets {
             let rel = (body.pos - self.bodies[body.center].pos).truncate();
             let p = self.display_point(body.center, rel);
             draw_circle(p.x, p.y, body.radius, body.color);
+        }
+    }
+
+    fn dt(&self) -> f64 {
+        DT
+    }
+
+    fn time_scale(&self) -> f64 {
+        self.speed
+    }
+
+    fn handle_input(&mut self) {
+        if is_key_pressed(KeyCode::Up) {
+            self.speed = (self.speed * 2.0).min(MAX_SPEED);
+        }
+        if is_key_pressed(KeyCode::Down) {
+            self.speed = (self.speed / 2.0).max(MIN_SPEED);
         }
     }
 

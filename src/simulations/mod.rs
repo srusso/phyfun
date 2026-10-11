@@ -1,3 +1,4 @@
+mod argon;
 mod blackhole;
 mod chain_reaction;
 mod double_pendulum;
@@ -26,6 +27,7 @@ pub const SIMULATIONS: &[Entry] = &[
     Entry { name: "chain-reaction", create: || Box::new(chain_reaction::ChainReaction::new()) },
     Entry { name: "top", create: || Box::new(top::Top::new()) },
     Entry { name: "galaxies", create: || Box::new(galaxies::Galaxies::new()) },
+    Entry { name: "argon", create: || Box::new(argon::Argon::new()) },
 ];
 
 /// Finds a simulation by name (case-insensitive) or by number.

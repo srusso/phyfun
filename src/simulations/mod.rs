@@ -1,3 +1,4 @@
+mod blackhole;
 mod double_pendulum;
 mod planets;
 mod slope;
@@ -16,6 +17,7 @@ pub const SIMULATIONS: &[Entry] = &[
     Entry { name: "slope", create: || Box::new(slope::Slope::new()) },
     Entry { name: "planets", create: || Box::new(planets::Planets::new()) },
     Entry { name: "double-pendulum", create: || Box::new(double_pendulum::DoublePendulum::new()) },
+    Entry { name: "blackhole", create: || Box::new(blackhole::BlackHole::new()) },
 ];
 
 /// Finds a simulation by name (case-insensitive) or by number.

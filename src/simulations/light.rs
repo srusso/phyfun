@@ -503,7 +503,8 @@ impl Bench {
         self.window = 0;
     }
 
-    /// Runs `steps` steps with fresh meters and reads them.
+    /// Runs `steps` steps with fresh meters and reads them (tests only).
+    #[cfg(test)]
     fn measure(&mut self, steps: usize) -> Report {
         self.reset_meters();
         for _ in 0..steps {

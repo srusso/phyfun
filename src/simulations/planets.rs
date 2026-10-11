@@ -101,11 +101,11 @@ struct Body {
     trail: VecDeque<DVec2>,
 }
 
-/// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body), plus the
-/// Sun's relativistic correction to every other body (the first post-Newtonian term, which is
-/// what makes Mercury's orbit precess) and the pull of Earth's equatorial bulge on the Moon.
-/// Not modelled: relativity between the planets themselves, asteroids, Pluto and the Kuiper
-/// belt, and the Moon's own shape and tides.
+/// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body), plus
+/// the first post-Newtonian relativity between every pair of bodies (the Einstein-Infeld-Hoffmann
+/// equations, which is what makes Mercury's orbit precess) and the pull of Earth's equatorial
+/// bulge on the Moon.
+/// Not modelled: asteroids, Pluto and the Kuiper belt, and the Moon's own shape and tides.
 /// Motion is 3D, so inclinations are real, but it is drawn from above the ecliptic.
 pub struct Planets {
     /// The Sun is `bodies[0]`.
@@ -154,6 +154,14 @@ impl Planets {
 
         let mut planets = Self { bodies, energy0: 0.0, speed: START_SPEED, t: 0.0 };
         planets.update_accelerations();
+        // With relativity the conserved momentum is not just the sum of m v. Remove what is left
+        // of it (twice, since it depends on the velocities themselves), or it starts at 1.5e-13.
+        for _ in 0..2 {
+            let drift = planets.momentum() / total_m;
+            for body in &mut planets.bodies {
+                body.v -= drift;
+            }
+        }
         planets.energy0 = planets.energy();
         planets
     }
@@ -190,8 +198,7 @@ impl Planets {
         self.bodies[EARTH].a -= a_moon * moon_to_earth_mass;
     }
 
-    /// One velocity Verlet (kick-drift-kick) step: second order, time-symmetric, one Newtonian
-    /// force evaluation.
+    /// One velocity Verlet (kick-drift-kick) step: second order, time-symmetric, one force evaluation.
     fn leapfrog(&mut self, dt: f64) {
         self.kick(dt / 2.0);
         for body in &mut self.bodies {
@@ -201,62 +208,104 @@ impl Planets {
         self.kick(dt / 2.0);
     }
 
-    /// Changes every velocity by `h` times its acceleration: the Newtonian `a` plus the
-    /// relativistic term. That term depends on velocity, so it is evaluated at the velocity
-    /// halfway through the kick, which keeps the step time-symmetric (and the integrator sixth order).
+    /// Changes every velocity by `h` times its acceleration (Newton, and Earth's bulge).
     fn kick(&mut self, h: f64) {
-        let v_mid: Vec<DVec3> = self.bodies.iter().map(|body| body.v + body.a * (h / 2.0)).collect();
-        let a_rel = self.relativistic_accelerations(&v_mid);
-        for (body, a_rel) in self.bodies.iter_mut().zip(a_rel) {
-            body.v += (body.a + a_rel) * h;
+        for body in &mut self.bodies {
+            body.v += body.a * h;
         }
     }
 
-    /// First post-Newtonian correction from the Sun's field, for velocities `v` (Sun is index 0):
-    ///   a = mu / (c^2 r^3) * [(4 mu / r - w^2) r_vec + 4 (r_vec . w) w],  mu = G m_sun,
-    /// with `r_vec` and `w` the position and velocity relative to the Sun. The reaction goes to the
-    /// Sun, so momentum stays conserved.
-    fn relativistic_accelerations(&self, v: &[DVec3]) -> Vec<DVec3> {
-        let sun = &self.bodies[0];
-        let mu = G * sun.m;
+    /// Newtonian potential at each body, U_i = sum over the others of G m_k / r_ik.
+    fn potentials(&self) -> Vec<f64> {
+        let mut u = vec![0.0; self.bodies.len()];
+        for i in 0..self.bodies.len() {
+            for j in (i + 1)..self.bodies.len() {
+                let r = (self.bodies[j].pos - self.bodies[i].pos).length();
+                u[i] += G * self.bodies[j].m / r;
+                u[j] += G * self.bodies[i].m / r;
+            }
+        }
+        u
+    }
+
+    /// Accelerations that are small (about 1e-8 of the total) and expensive: first
+    /// post-Newtonian relativity between every pair of bodies (the Einstein-Infeld-Hoffmann
+    /// equations). For i != j, with `d` = position of j minus i, `a_j` the Newtonian
+    /// acceleration of j and U the potentials from `potentials`:
+    ///   B = -4 U_i - U_j + v_i^2 + 2 v_j^2 - 4 v_i.v_j - 3/2 (d.v_j / r)^2 + 1/2 d.a_j
+    ///   a_i += G m_j / c^2 [ (B d - (d.(4 v_i - 3 v_j)) (v_i - v_j)) / r^3 + 7/2 a_j / r ]
+    /// Uses the positions, velocities and `body.a` as they are now.
+    fn slow_accelerations(&self) -> Vec<DVec3> {
+        let u = self.potentials();
         let mut a = vec![DVec3::ZERO; self.bodies.len()];
-        for (i, body) in self.bodies.iter().enumerate().skip(1) {
-            let rel = body.pos - sun.pos;
-            let w = v[i] - v[0];
-            let r = rel.length();
-            let a_i = (rel * (4.0 * mu / r - w.length_squared()) + w * (4.0 * rel.dot(w)))
-                * (mu / (C * C * r * r * r));
-            a[i] = a_i;
-            a[0] -= a_i * (body.m / sun.m);
+        for (i, bi) in self.bodies.iter().enumerate() {
+            for (j, bj) in self.bodies.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let d = bj.pos - bi.pos;
+                let r = d.length();
+                let b = -4.0 * u[i] - u[j] + bi.v.length_squared() + 2.0 * bj.v.length_squared()
+                    - 4.0 * bi.v.dot(bj.v)
+                    - 1.5 * (d.dot(bj.v) / r).powi(2)
+                    + 0.5 * d.dot(bj.a);
+                let along = d.dot(4.0 * bi.v - 3.0 * bj.v);
+                a[i] += (G * bj.m / (C * C)) * ((d * b - (bi.v - bj.v) * along) / (r * r * r) + bj.a * (3.5 / r));
+            }
         }
         a
     }
 
-    /// Kinetic plus gravitational potential energy, plus the relativistic correction. That is
-    /// exact for one planet around the Sun and ignores cross terms between planets, so it
-    /// is conserved to ~1e-11 rather than ~1e-13.
-    fn energy(&self) -> f64 {
-        let mut e = 0.0;
-        for (i, body) in self.bodies.iter().enumerate() {
-            e += 0.5 * body.m * body.v.length_squared();
-            for other in &self.bodies[(i + 1)..] {
-                e -= G * body.m * other.m / (other.pos - body.pos).length();
-            }
+    /// Changes every velocity by `h` times the slow accelerations.
+    fn slow_kick(&mut self, h: f64) {
+        let a = self.slow_accelerations();
+        for (body, a) in self.bodies.iter_mut().zip(a) {
+            body.v += a * h;
         }
+    }
 
-        let sun = &self.bodies[0];
-        let mu = G * sun.m;
-        for body in &self.bodies[1..] {
-            let w2 = (body.v - sun.v).length_squared();
-            let r = (body.pos - sun.pos).length();
-            e += body.m / (C * C) * (3.0 / 8.0 * w2 * w2 + 1.5 * mu * w2 / r + 0.5 * mu * mu / (r * r));
+    /// Total energy including the post-Newtonian terms of the EIH equations (conserved to ~1e-13):
+    ///   E = sum_i m_i [v^2/2 - U/2 + (3 v^4/8 + 3 U v^2/2 + U^2/2) / c^2]
+    ///       - G / (4 c^2) sum_i sum_{j != i} (m_i m_j / r) (7 v_i.v_j + (n.v_i)(n.v_j)),
+    /// with n the unit vector between i and j. Earth's bulge is left out; it doesn't show at this level.
+    fn energy(&self) -> f64 {
+        let u = self.potentials();
+        let c2 = C * C;
+        let mut e = 0.0;
+        for (i, bi) in self.bodies.iter().enumerate() {
+            let v2 = bi.v.length_squared();
+            e += bi.m * (v2 / 2.0 - u[i] / 2.0 + (0.375 * v2 * v2 + 1.5 * u[i] * v2 + 0.5 * u[i] * u[i]) / c2);
+            for (j, bj) in self.bodies.iter().enumerate() {
+                if i != j {
+                    let d = bj.pos - bi.pos;
+                    let r = d.length();
+                    let n = d / r;
+                    e -= G / (4.0 * c2) * bi.m * bj.m / r * (7.0 * bi.v.dot(bj.v) + n.dot(bi.v) * n.dot(bj.v));
+                }
+            }
         }
         e
     }
 
-    /// Total momentum. Starts at zero in the center-of-mass frame and must stay there.
+    /// Total momentum with the post-Newtonian terms. Starts at zero in the center-of-mass frame
+    /// and must stay there:
+    ///   P = sum_i m_i v_i [1 + (v^2/2 - U/2) / c^2] - G / (2 c^2) sum_i sum_{j != i} (m_i m_j / r)(n.v_j) n
     fn momentum(&self) -> DVec3 {
-        self.bodies.iter().map(|body| body.m * body.v).sum()
+        let u = self.potentials();
+        let c2 = C * C;
+        let mut p = DVec3::ZERO;
+        for (i, bi) in self.bodies.iter().enumerate() {
+            p += bi.m * bi.v * (1.0 + (bi.v.length_squared() / 2.0 - u[i] / 2.0) / c2);
+            for (j, bj) in self.bodies.iter().enumerate() {
+                if i != j {
+                    let d = bj.pos - bi.pos;
+                    let r = d.length();
+                    let n = d / r;
+                    p -= G / (2.0 * c2) * bi.m * bj.m / r * n.dot(bj.v) * n;
+                }
+            }
+        }
+        p
     }
 
     /// Drawing coordinates of a point given (seen from above) relative to the body `center`.
@@ -278,9 +327,13 @@ fn to_display(rel: DVec2) -> Vec2 {
 
 impl Simulation for Planets {
     fn step(&mut self, dt: f64) {
+        // The slow accelerations are applied once at each end of the step, at second order; they
+        // are 1e-8 of the total, so that costs nothing visible and saves five sixths of the work.
+        self.slow_kick(dt / 2.0);
         for weight in YOSHIDA6 {
             self.leapfrog(weight * dt);
         }
+        self.slow_kick(dt / 2.0);
         self.t += dt;
 
         // Trails are sampled by angle around the body orbited, so each shows about one orbit.
@@ -380,15 +433,15 @@ mod tests {
     #[test]
     fn conserves_energy_and_momentum() {
         let mut planets = Planets::new();
-        assert!(planets.momentum().length() < 1e-12);
+        assert!(planets.momentum().length() < 1e-14);
 
         // 20 years: ~1.7 Jupiter orbits, 83 Mercury orbits.
         for _ in 0..(20.0 / DT) as usize {
             planets.step(DT);
         }
         let drift = (planets.energy() - planets.energy0) / planets.energy0.abs();
-        assert!(drift.abs() < 1e-10, "energy drift {drift}");
-        assert!(planets.momentum().length() < 1e-12, "momentum {}", planets.momentum().length());
+        assert!(drift.abs() < 1e-12, "energy drift {drift}");
+        assert!(planets.momentum().length() < 1e-14, "momentum {}", planets.momentum().length());
     }
 
     #[test]
@@ -466,13 +519,13 @@ mod tests {
 
     #[test]
     fn agrees_with_jpl_ephemeris() {
-        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 0.08 degrees as seen
-        // from Earth. What is left is mostly what the model leaves out: relativity between the
-        // planets, asteroids, Pluto, and the Moon's shape and tides.
+        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 25 arcseconds as seen
+        // from Earth. What is left is mostly what the model leaves out: asteroids, Pluto, and the
+        // Moon's shape and tides.
         let arcsec = std::f64::consts::PI / 180.0 / 3600.0;
         for (days, expected) in [(18_263.0, &HORIZONS_2050), (36_525.0, &HORIZONS_2100)] {
             for (i, error) in angle_errors_against(days, expected).iter().enumerate() {
-                let limit = if i + 1 == MOON { 0.08 * 3600.0 * arcsec } else { 0.05 * arcsec };
+                let limit = if i + 1 == MOON { 25.0 * arcsec } else { 0.05 * arcsec };
                 assert!(*error < limit, "body {} off by {:.3} arcsec after {days} days", i + 1, error / arcsec);
             }
         }

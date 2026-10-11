@@ -25,6 +25,16 @@ const EARTH_RADIUS_KM: f64 = 6378.1366;
 const EARTH_TILT_ARCSEC: f64 = 84_381.448;
 const EARTH_PRECESSION_ARCSEC: f64 = 5038.481_507;
 
+/// Tides raised on Earth by the Moon, as JPL models them (DE441 header): one Love number and two
+/// time lags for each tidal period (long, daily, twice daily). `TIDE_ORBIT_LAG_DAYS` is how far
+/// back along its orbit the Moon is when the tide responds, `TIDE_SPIN_LAG_DAYS` how long the
+/// Earth's rotation carries the bulge ahead (days). Earth's spin rate is in rad/day (IERS
+/// Conventions 2010, from memory).
+const TIDE_LOVE: [f64; 3] = [0.335, 0.277, 0.283];
+const TIDE_ORBIT_LAG_DAYS: [f64; 3] = [0.077, -0.01, -0.209_822_438_268_326_72];
+const TIDE_SPIN_LAG_DAYS: [f64; 3] = [0.0, 0.011_929_122_823_877_609, -0.000_742_362_752_988_307];
+const EARTH_SPIN: f64 = std::f64::consts::TAU * 1.002_737_811_911_354_5;
+
 /// The Moon's shape (DE441 header): its mean radius (km), the degree-2 gravity coefficients J2 and
 /// C22 (flattening at the poles, elongation towards Earth), and the moments of inertia as
 /// beta = (C - A) / B and gamma = (B - A) / C, with A < B < C the principal moments.
@@ -126,8 +136,9 @@ struct Body {
 /// the first post-Newtonian relativity between every pair of bodies (the Einstein-Infeld-Hoffmann
 /// equations, which is what makes Mercury's orbit precess), the pull of Earth's equatorial
 /// bulge on the Moon and of the Moon's own shape on Earth, with the Moon's rotation integrated
-/// (so that it keeps its long axis pointing at Earth).
-/// Not modelled: asteroids, Pluto and the Kuiper belt, and tides.
+/// (so that it keeps its long axis pointing at Earth), and the tides the Moon raises on Earth,
+/// which pull the Moon forward and widen its orbit.
+/// Not modelled: asteroids, Pluto and the Kuiper belt, and tidal friction inside the Moon.
 /// Motion is 3D, so inclinations are real, but it is drawn from above the ecliptic.
 pub struct Planets {
     /// The Sun is `bodies[0]`.
@@ -337,7 +348,47 @@ impl Planets {
                 a[i] += (G * bj.m / (C * C)) * ((d * b - (bi.v - bj.v) * along) / (r * r * r) + bj.a * (3.5 / r));
             }
         }
+
+        let a_moon = self.tidal_acceleration();
+        a[MOON] += a_moon;
+        a[EARTH] -= a_moon * (self.bodies[MOON].m / self.bodies[EARTH].m);
         a
+    }
+
+    /// Acceleration of the Moon from the tides it raises on Earth (DE441's model). The Moon
+    /// stretches Earth; Earth's rotation carries the bulge ahead of the Moon, and the bulge pulls
+    /// the Moon forward, which widens its orbit and slows it down. For each tidal period j, the
+    /// bulge responds to where the Moon was (`delayed`, first order in the orbit lag), turned about
+    /// Earth's axis `p` by the spin lag. With `rel`, `w` the Moon's position and velocity from
+    /// Earth, z = rel.p, rho = rel - z p, and the same with s for `delayed`, q = rho.rhos:
+    ///   T0 = 2 zs^2 z p + |rhos|^2 rho + [rs^2 - 5 ((z zs)^2 + |rho|^2 |rhos|^2 / 2) / r^2] rel
+    ///   T1 = 2 (q zs p + z zs rhos) - 10 z zs q rel / r^2
+    ///   T2 = 2 q rhos - |rhos|^2 rho - 5 (q^2 - |rho|^2 |rhos|^2 / 2) rel / r^2
+    ///   a_moon = 3/2 G m_moon R^5 / r^5 * sum_j k_j / rs^5 * T_j
+    /// (the gradient of the degree-2 tidal potential, split by order). Earth gets the reaction.
+    fn tidal_acceleration(&self) -> DVec3 {
+        let (earth, moon) = (&self.bodies[EARTH], &self.bodies[MOON]);
+        let pole = self.earth_pole();
+        let radius = EARTH_RADIUS_KM / AU_KM;
+        let (rel, w) = (moon.pos - earth.pos, moon.v - earth.v);
+        let (r2, z) = (rel.length_squared(), rel.dot(pole));
+        let rho = rel - z * pole;
+        let mut sum = DVec3::ZERO;
+        for j in 0..3 {
+            let delayed = rel - w * (TIDE_ORBIT_LAG_DAYS[j] / DAYS_PER_YEAR);
+            let delayed = DQuat::from_axis_angle(pole, EARTH_SPIN * TIDE_SPIN_LAG_DAYS[j]) * delayed;
+            let zs = delayed.dot(pole);
+            let rhos = delayed - zs * pole;
+            let rs2 = delayed.length_squared();
+            let (rho2, rhos2, q) = (rho.length_squared(), rhos.length_squared(), rho.dot(rhos));
+            let t = match j {
+                0 => 2.0 * zs * zs * z * pole + rhos2 * rho + (rs2 - 5.0 * ((z * zs).powi(2) + rho2 * rhos2 / 2.0) / r2) * rel,
+                1 => 2.0 * (q * zs * pole + z * zs * rhos) - 10.0 * z * zs * q * rel / r2,
+                _ => 2.0 * q * rhos - rhos2 * rho - 5.0 * (q * q - rho2 * rhos2 / 2.0) * rel / r2,
+            };
+            sum += t * (TIDE_LOVE[j] / (rs2 * rs2 * rs2.sqrt()));
+        }
+        sum * (1.5 * G * moon.m * radius.powi(5) / (r2 * r2 * r2.sqrt()))
     }
 
     /// Changes every velocity by `h` times the slow accelerations.
@@ -613,14 +664,14 @@ mod tests {
 
     #[test]
     fn agrees_with_jpl_ephemeris() {
-        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 25 arcseconds as seen
+        // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 1 arcsecond as seen
         // from Earth, and its x and z axes within 0.1 degrees of JPL's. What is left is mostly what
-        // the model leaves out: asteroids, Pluto, and tides.
+        // the model leaves out: asteroids, Pluto, and friction inside the Moon.
         let arcsec = std::f64::consts::PI / 180.0 / 3600.0;
         for (days, expected, axes) in [(18_263.0, &HORIZONS_2050, MOON_AXES_2050), (36_525.0, &HORIZONS_2100, MOON_AXES_2100)] {
             let planets = simulate(days / DAYS_PER_YEAR, DT);
             for (i, error) in angle_errors_against(&planets, expected).iter().enumerate() {
-                let limit = if i + 1 == MOON { 25.0 * arcsec } else { 0.05 * arcsec };
+                let limit = if i + 1 == MOON { 1.0 * arcsec } else { 0.05 * arcsec };
                 assert!(*error < limit, "body {} off by {:.3} arcsec after {days} days", i + 1, error / arcsec);
             }
             for (i, expected) in axes.iter().enumerate() {

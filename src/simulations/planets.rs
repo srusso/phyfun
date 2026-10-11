@@ -25,6 +25,24 @@ const EARTH_RADIUS_KM: f64 = 6378.1366;
 const EARTH_TILT_ARCSEC: f64 = 84_381.448;
 const EARTH_PRECESSION_ARCSEC: f64 = 5038.481_507;
 
+/// The Moon's shape (DE441 header): its mean radius (km), the degree-2 gravity coefficients J2 and
+/// C22 (flattening at the poles, elongation towards Earth), and the moments of inertia as
+/// beta = (C - A) / B and gamma = (B - A) / C, with A < B < C the principal moments.
+const MOON_RADIUS_KM: f64 = 1738.0;
+const MOON_J2: f64 = 2.032_143_601_35e-4;
+const MOON_C22: f64 = 2.238_085_052_817_101_7e-5;
+const MOON_BETA: f64 = 6.312_204_073_791_423e-4;
+const MOON_GAMMA: f64 = 2.277_889_847_743_316_7e-4;
+
+/// The Moon's orientation at J2000, from DE441's libration angles, in the ecliptic frame: its
+/// axes (x towards Earth on average, z the spin axis) and its angular velocity along them (rad/day).
+const MOON_AXES_J2000: [[f64; 3]; 3] = [
+    [0.7840448615339242, 0.6201196340768838, 0.026931292850540856],
+    [-0.6203031577593041, 0.7843598318583443, -0.0019096180208870717],
+    [-0.022308015960317097, -0.015208339800961979, 0.9996354629685826],
+];
+const MOON_SPIN_J2000: [f64; 3] = [2.214634475569498e-6, -6.601992575835387e-5, 0.2299934188760787];
+
 /// Physics step in years. Mercury's orbit is 0.24 yr, so this is ~480 steps per orbit, and
 /// the Moon's (0.075 yr) ~150. With the sixth-order integrator this leaves positions accurate to
 /// ~1e-8 AU over a century, far below the errors of the model itself.
@@ -106,13 +124,20 @@ struct Body {
 
 /// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body), plus
 /// the first post-Newtonian relativity between every pair of bodies (the Einstein-Infeld-Hoffmann
-/// equations, which is what makes Mercury's orbit precess) and the pull of Earth's equatorial
-/// bulge on the Moon.
-/// Not modelled: asteroids, Pluto and the Kuiper belt, and the Moon's own shape and tides.
+/// equations, which is what makes Mercury's orbit precess), the pull of Earth's equatorial
+/// bulge on the Moon and of the Moon's own shape on Earth, with the Moon's rotation integrated
+/// (so that it keeps its long axis pointing at Earth).
+/// Not modelled: asteroids, Pluto and the Kuiper belt, and tides.
 /// Motion is 3D, so inclinations are real, but it is drawn from above the ecliptic.
 pub struct Planets {
     /// The Sun is `bodies[0]`.
     bodies: Vec<Body>,
+    /// The Moon's axes in the ecliptic frame (columns x, y, z) and its angular velocity along
+    /// them (rad/yr).
+    moon_axes: DMat3,
+    moon_spin: DVec3,
+    /// Earth's position from the Moon in the Moon's axes, as of the last force evaluation.
+    earth_from_moon: DVec3,
     /// Total energy at the start, to measure drift against.
     energy0: f64,
     speed: f64,
@@ -155,7 +180,16 @@ impl Planets {
             body.v -= drift;
         }
 
-        let mut planets = Self { bodies, energy0: 0.0, speed: START_SPEED, t: 0.0 };
+        let [x, y, z] = MOON_AXES_J2000.map(DVec3::from);
+        let mut planets = Self {
+            bodies,
+            moon_axes: DMat3::from_cols(x, y, z),
+            moon_spin: DVec3::from(MOON_SPIN_J2000) * DAYS_PER_YEAR,
+            earth_from_moon: DVec3::ZERO,
+            energy0: 0.0,
+            speed: START_SPEED,
+            t: 0.0,
+        };
         planets.update_accelerations();
         // With relativity the conserved momentum is not just the sum of m v. Remove what is left
         // of it (twice, since it depends on the velocities themselves), or it starts at 1.5e-13.
@@ -206,6 +240,39 @@ impl Planets {
         let moon_to_earth_mass = moon.m / earth.m;
         self.bodies[MOON].a += a_moon;
         self.bodies[EARTH].a -= a_moon * moon_to_earth_mass;
+
+        // Extra pull of the Moon's shape on Earth. With `e` Earth's position from the Moon in the
+        // Moon's axes, r = |e| and the degree-2 shape T = diag(-J2/3 - 2 C22, -J2/3 + 2 C22, 2 J2/3):
+        //   a_earth = -3/2 G m_moon R^2 / r^5 * [2 T e - 5 (e . T e / r^2) e]   (in the Moon's axes).
+        // With T = J2 diag(-1/3, -1/3, 2/3) this is the formula for Earth's bulge above.
+        let (earth, moon) = (&self.bodies[EARTH], &self.bodies[MOON]);
+        let e = self.moon_axes.transpose() * (earth.pos - moon.pos);
+        let r2 = e.length_squared();
+        let shape = dvec3(-MOON_J2 / 3.0 - 2.0 * MOON_C22, -MOON_J2 / 3.0 + 2.0 * MOON_C22, 2.0 * MOON_J2 / 3.0);
+        let radius = MOON_RADIUS_KM / AU_KM;
+        let k = -1.5 * G * moon.m * radius * radius / (r2 * r2 * r2.sqrt());
+        let a_earth = self.moon_axes * ((2.0 * shape * e - 5.0 * (e.dot(shape * e) / r2) * e) * k);
+        let earth_to_moon_mass = earth.m / moon.m;
+        self.earth_from_moon = e;
+        self.bodies[EARTH].a += a_earth;
+        self.bodies[MOON].a -= a_earth * earth_to_moon_mass;
+    }
+
+    /// Rate of change of the Moon's angular velocity `s` (along its axes): Euler's equations for
+    /// a rigid body, with the torque of Earth's pull on the Moon's shape. With e = Earth's
+    /// position from the Moon in its axes, k = 3 G m_earth / r^5, alpha = (beta - gamma) / (1 - beta gamma):
+    ///   ( alpha (k e_y e_z - s_y s_z),  beta (s_z s_x - k e_z e_x),  gamma (k e_x e_y - s_x s_y) ).
+    /// This keeps the long axis pointing at Earth, as it does in reality.
+    fn moon_spin_rate(&self, s: DVec3) -> DVec3 {
+        let e = self.earth_from_moon;
+        let r2 = e.length_squared();
+        let k = 3.0 * G * self.bodies[EARTH].m / (r2 * r2 * r2.sqrt());
+        let alpha = (MOON_BETA - MOON_GAMMA) / (1.0 - MOON_BETA * MOON_GAMMA);
+        dvec3(
+            alpha * (k * e.y * e.z - s.y * s.z),
+            MOON_BETA * (s.z * s.x - k * e.z * e.x),
+            MOON_GAMMA * (k * e.x * e.y - s.x * s.y),
+        )
     }
 
     /// One velocity Verlet (kick-drift-kick) step: second order, time-symmetric, one force evaluation.
@@ -214,15 +281,22 @@ impl Planets {
         for body in &mut self.bodies {
             body.pos += body.v * dt;
         }
+        // The Moon's axes turn about its angular velocity (in the ecliptic frame) by |s| dt.
+        let turn = DQuat::from_scaled_axis(self.moon_axes * self.moon_spin * dt);
+        self.moon_axes = DMat3::from_quat(turn) * self.moon_axes;
         self.update_accelerations();
         self.kick(dt / 2.0);
     }
 
-    /// Changes every velocity by `h` times its acceleration (Newton, and Earth's bulge).
+    /// Changes every velocity by `h` times its acceleration (Newton, and the bulges), and the
+    /// Moon's angular velocity by its torque. The torque rate depends on the spin itself, so it
+    /// is evaluated at the midpoint, which keeps the step time-symmetric.
     fn kick(&mut self, h: f64) {
         for body in &mut self.bodies {
             body.v += body.a * h;
         }
+        let middle = self.moon_spin + self.moon_spin_rate(self.moon_spin) * (h / 2.0);
+        self.moon_spin += self.moon_spin_rate(middle) * h;
     }
 
     /// Newtonian potential at each body, U_i = sum over the others of G m_k / r_ik.
@@ -512,8 +586,8 @@ mod tests {
     /// Error of each simulated body after `days` as an angle (radians): the distance from JPL's
     /// position divided by the distance to the Sun. The Moon is compared relative to Earth, since
     /// seen from the Sun it would mostly measure Earth's error.
-    fn angle_errors_against(days: f64, expected: &[[f64; 3]; 9]) -> Vec<f64> {
-        let pos = positions_after(days / DAYS_PER_YEAR, DT);
+    fn angle_errors_against(planets: &Planets, expected: &[[f64; 3]; 9]) -> Vec<f64> {
+        let pos: Vec<DVec3> = planets.bodies.iter().map(|body| body.pos).collect();
         let expected = expected.map(DVec3::from);
         (1..10)
             .map(|i| {
@@ -527,18 +601,48 @@ mod tests {
             .collect()
     }
 
+    /// The Moon's x and z axes (ecliptic frame) from DE441's libration angles, 2050 and 2100.
+    const MOON_AXES_2050: [[f64; 3]; 2] = [
+        [-0.9500539443873893, -0.3116741759037299, 0.016022197998215748],
+        [0.02168693768881873, -0.014717506437987748, 0.9996564768648923],
+    ];
+    const MOON_AXES_2100: [[f64; 3]; 2] = [
+        [0.9650697456435079, -0.2619842062642416, 0.002159099736070494],
+        [0.00491336385439683, 0.026337707842773006, 0.9996410275700088],
+    ];
+
     #[test]
     fn agrees_with_jpl_ephemeris() {
         // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 25 arcseconds as seen
-        // from Earth. What is left is mostly what the model leaves out: asteroids, Pluto, and the
-        // Moon's shape and tides.
+        // from Earth, and its x and z axes within 0.1 degrees of JPL's. What is left is mostly what
+        // the model leaves out: asteroids, Pluto, and tides.
         let arcsec = std::f64::consts::PI / 180.0 / 3600.0;
-        for (days, expected) in [(18_263.0, &HORIZONS_2050), (36_525.0, &HORIZONS_2100)] {
-            for (i, error) in angle_errors_against(days, expected).iter().enumerate() {
+        for (days, expected, axes) in [(18_263.0, &HORIZONS_2050, MOON_AXES_2050), (36_525.0, &HORIZONS_2100, MOON_AXES_2100)] {
+            let planets = simulate(days / DAYS_PER_YEAR, DT);
+            for (i, error) in angle_errors_against(&planets, expected).iter().enumerate() {
                 let limit = if i + 1 == MOON { 25.0 * arcsec } else { 0.05 * arcsec };
                 assert!(*error < limit, "body {} off by {:.3} arcsec after {days} days", i + 1, error / arcsec);
             }
+            for (i, expected) in axes.iter().enumerate() {
+                let axis = if i == 0 { planets.moon_axes.x_axis } else { planets.moon_axes.z_axis };
+                let off = axis.angle_between(DVec3::from(*expected)).to_degrees();
+                assert!(off < 0.1, "Moon's {} axis is {off} degrees off after {days} days", if i == 0 { "x" } else { "z" });
+            }
         }
+    }
+
+    #[test]
+    fn moon_keeps_one_face_towards_earth() {
+        // The Moon's long axis points at Earth to within its libration (up to about 10 degrees).
+        // A missing or reversed torque fails within a few years.
+        let mut planets = Planets::new();
+        let mut worst: f64 = 0.0;
+        for _ in 0..(20.0 / DT) as usize {
+            planets.step(DT);
+            let to_earth = planets.bodies[EARTH].pos - planets.bodies[MOON].pos;
+            worst = worst.max(planets.moon_axes.x_axis.angle_between(to_earth).to_degrees());
+        }
+        assert!(worst < 12.0, "the Moon's long axis strays {worst} degrees from Earth");
     }
 
     #[test]

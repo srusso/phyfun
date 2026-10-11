@@ -52,6 +52,17 @@ fn equilibrium(rho: f64, ux: f64, uy: f64) -> [f64; 9] {
     f
 }
 
+/// A link from a fluid node to the cylinder, for interpolated bounce-back (Bouzidi, Firdaouss
+/// and Lallemand 2001, linear): the population `q` arriving at `node` would come from a cylinder
+/// node; the true surface is the fraction `s` of the way along the link.
+struct Link {
+    node: usize,
+    q: usize,
+    s: f64,
+    /// The node one step further from the surface (`node + c_q`).
+    behind: usize,
+}
+
 /// A lattice Boltzmann solver: D2Q9, two-relaxation-time collision, bounce-back walls, Zou-He
 /// open ends. No macroquad types, so tests can build it without a window.
 struct Lattice {
@@ -66,6 +77,9 @@ struct Lattice {
     omega_minus: f64,
     /// Prescribed u_x for each row at the inlet; `None` means periodic in x (tests only).
     inlet: Option<Vec<f64>>,
+    /// Links to the cylinder; if there are any, the cylinder is a true circle (interpolated
+    /// bounce-back), otherwise it is a staircase of nodes with halfway bounce-back.
+    links: Vec<Link>,
     /// Force on the cylinder during the last step.
     force: (f64, f64),
 }
@@ -86,12 +100,13 @@ impl Lattice {
                 }
             }
         }
-        Self { nx, ny, f_post: f.clone(), f, nodes, omega_plus: 1.0 / tau, omega_minus: 1.0 / tau_minus, inlet, force: (0.0, 0.0) }
+        Self { nx, ny, f_post: f.clone(), f, nodes, omega_plus: 1.0 / tau, omega_minus: 1.0 / tau_minus, inlet, links: Vec::new(), force: (0.0, 0.0) }
     }
 
     fn step(&mut self) {
         self.collide();
         self.stream();
+        self.bounce_back_from_cylinder();
         if self.inlet.is_some() {
             self.apply_open_ends();
         }
@@ -143,7 +158,7 @@ impl Lattice {
                     } else {
                         let back = self.f_post[9 * k + OPPOSITE[q]];
                         self.f[9 * k + q] = back;
-                        if self.nodes[source] == Node::Cylinder {
+                        if self.nodes[source] == Node::Cylinder && self.links.is_empty() {
                             let c = C[OPPOSITE[q]];
                             force.0 += 2.0 * back * c.0 as f64;
                             force.1 += 2.0 * back * c.1 as f64;
@@ -153,6 +168,37 @@ impl Lattice {
             }
         }
         self.force = force;
+    }
+
+    /// Interpolated bounce-back along every link to the cylinder, replacing what streaming put
+    /// there, and the force from it. With `g` the population that left the node towards the
+    /// surface: for a surface closer than halfway (`s < 1/2`) the returning population is taken
+    /// between `g` and the one one node further from the surface; otherwise between `g` and the
+    /// population that stays. Either way it is `g` for `s = 1/2`, plain halfway bounce-back.
+    fn bounce_back_from_cylinder(&mut self) {
+        let mut force = (0.0, 0.0);
+        for link in &self.links {
+            let (k, q) = (link.node, link.q);
+            let back = OPPOSITE[q];
+            let g = self.f_post[9 * k + back];
+            let s = link.s;
+            let returning = if s < 0.5 {
+                if self.nodes[link.behind] == Node::Fluid {
+                    2.0 * s * g + (1.0 - 2.0 * s) * self.f_post[9 * link.behind + back]
+                } else {
+                    g
+                }
+            } else {
+                g / (2.0 * s) + (1.0 - 1.0 / (2.0 * s)) * self.f_post[9 * k + q]
+            };
+            self.f[9 * k + q] = returning;
+            let c = C[back];
+            force.0 += (g + returning) * c.0 as f64;
+            force.1 += (g + returning) * c.1 as f64;
+        }
+        if !self.links.is_empty() {
+            self.force = force;
+        }
     }
 
     /// Zou-He boundary conditions on the first and last column: the three populations that the
@@ -235,7 +281,38 @@ fn channel(reynolds: f64) -> Lattice {
         })
         .collect();
     let nu = MEAN_INLET_SPEED * n as f64 / reynolds;
-    Lattice::new(nx, ny, nu, nodes, Some(inlet))
+    let mut lattice = Lattice::new(nx, ny, nu, nodes, Some(inlet));
+    lattice.links = cylinder_links(&lattice, (cx, cy), radius);
+    lattice
+}
+
+/// The links between fluid nodes and the cylinder, with the fraction of each link at which the
+/// circle of radius `radius` around `centre` cuts it: for a node at offset p from the centre and
+/// the link direction d (towards the cylinder), solve |p + s d|^2 = radius^2 for the smaller root.
+fn cylinder_links(lattice: &Lattice, centre: (f64, f64), radius: f64) -> Vec<Link> {
+    let nx = lattice.nx as i32;
+    let mut links = Vec::new();
+    for j in 0..lattice.ny as i32 {
+        for i in 0..nx {
+            let node = (j * nx + i) as usize;
+            if lattice.nodes[node] != Node::Fluid {
+                continue;
+            }
+            for q in 1..9 {
+                let (si, sj) = ((i - C[q].0).rem_euclid(nx), (j - C[q].1).rem_euclid(lattice.ny as i32));
+                if lattice.nodes[(sj * nx + si) as usize] != Node::Cylinder {
+                    continue;
+                }
+                let d = (-C[q].0 as f64, -C[q].1 as f64);
+                let p = (i as f64 - centre.0, j as f64 - centre.1);
+                let (a, b, c) = (d.0 * d.0 + d.1 * d.1, 2.0 * (p.0 * d.0 + p.1 * d.1), p.0 * p.0 + p.1 * p.1 - radius * radius);
+                let s = (-b - (b * b - 4.0 * a * c).sqrt()) / (2.0 * a);
+                let behind = ((j + C[q].1).rem_euclid(lattice.ny as i32) * nx + (i + C[q].0).rem_euclid(nx)) as usize;
+                links.push(Link { node, q, s, behind });
+            }
+        }
+    }
+    links
 }
 
 /// Drag and lift coefficients, C = 2 F / (mean speed^2 D), from the force of the last step.
@@ -550,7 +627,7 @@ mod tests {
         }
         let (drag, lift) = drag_lift(&lattice);
         let length = recirculation_length(&lattice).unwrap();
-        assert!((drag / 5.58 - 1.0).abs() < 0.02, "C_D = {drag}");
+        assert!((drag / 5.58 - 1.0).abs() < 0.01, "C_D = {drag}");
         assert!((lift - 0.0107).abs() < 0.0012, "C_L = {lift}");
         assert!((length / 0.847 - 1.0).abs() < 0.02, "L_a / D = {length}");
     }
@@ -578,7 +655,7 @@ mod tests {
         let drag_max = drags[range.clone()].iter().cloned().fold(f64::MIN, f64::max);
         let lift_max = lifts[range].iter().cloned().fold(f64::MIN, f64::max);
         assert!((strouhal / 0.300 - 1.0).abs() < 0.02, "St = {strouhal}");
-        assert!((drag_max / 3.23 - 1.0).abs() < 0.06, "C_D max = {drag_max}");
-        assert!((lift_max / 1.00 - 1.0).abs() < 0.13, "C_L max = {lift_max}");
+        assert!((drag_max / 3.23 - 1.0).abs() < 0.05, "C_D max = {drag_max}");
+        assert!((lift_max / 1.00 - 1.0).abs() < 0.06, "C_L max = {lift_max}");
     }
 }

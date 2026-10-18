@@ -79,6 +79,7 @@ const MAX_SPEED: f64 = START_SPEED * 32.0;
 // Drawing. See `to_display` for how AU map to the screen.
 const STAR_RADIUS: f32 = 0.25;
 const PLANET_RADIUS: f32 = 0.09;
+const DWARF_PLANET_RADIUS: f32 = 0.06;
 const MOON_RADIUS: f32 = 0.05;
 const TRAIL_WIDTH: f32 = 0.03;
 /// The Moon is only 0.0026 AU from Earth, which would sit on top of it. Its offset from Earth is
@@ -91,8 +92,8 @@ const TRAIL_LEN: usize = 130;
 
 /// Initial state of a body, from JPL Horizons (DE441 ephemeris) at J2000: 2000-01-01 12:00 TDB.
 /// Positions and velocities are relative to the solar system barycenter, in the ecliptic frame.
-/// Mars and the giant planets are the barycenters of their systems (planet plus moons), with the
-/// mass of the whole system, so their moons are accounted for without simulating them.
+/// Mars, the giant planets and Pluto are the barycenters of their systems (planet plus moons), with
+/// the mass of the whole system, so their moons are accounted for without simulating them.
 struct Start {
     /// G times mass, km^3/s^2 (JPL's DE440/441 values).
     gm: f64,
@@ -106,10 +107,11 @@ struct Start {
 }
 
 const EARTH: usize = 3;
-const MOON: usize = 9;
+const PLUTO: usize = 9;
+const MOON: usize = 10;
 
-/// The Sun, the eight planets and the Moon, at the indices above.
-const START: [Start; 10] = [
+/// The Sun, the eight planets, Pluto and the Moon, at the indices above.
+const START: [Start; 11] = [
     Start { gm: 132712440041.279419, pos: [-0.007137179161607904, -0.002795997495567612, 0.0002062985061910257], v: [5.378460339618783e-06, -7.406916207973516e-06, -9.43429343213747e-08], center: 0, color: YELLOW }, // Sun
     Start { gm: 22031.868551, pos: [-0.1372307845370601, -0.450083615630924, -0.02439200845186075], v: [0.02137177412835578, -0.006455396660044872, -0.002487957757771483], center: 0, color: LIGHTGRAY }, // Mercury
     Start { gm: 324858.592, pos: [-0.725439475506997, -0.03545030569537367, 0.04122048053303724], v: [0.0008034959761149407, -0.02030262561844178, -0.0003235458586621571], center: 0, color: BEIGE }, // Venus
@@ -119,6 +121,7 @@ const START: [Start; 10] = [
     Start { gm: 37940584.8418, pos: [6.399271680371201, 6.567193619416989, -0.3688701277386623], v: [-0.004286973413503631, 0.003882908781806891, 0.0001028535064646593], center: 0, color: GOLD }, // Saturn
     Start { gm: 5794556.4, pos: [14.42471943522018, -13.73711746626653, -0.2379353892930592], v: [0.002683484051759769, 0.002665288979504713, -2.486640648937235e-05], center: 0, color: SKYBLUE }, // Uranus
     Start { gm: 6836527.10058, pos: [16.80490978889128, -24.99455888678026, 0.1274291784264387], v: [0.002584652719387356, 0.001769493903808153, -9.600395792023743e-05], center: 0, color: VIOLET }, // Neptune
+    Start { gm: 975.5, pos: [-9.882489409085188, -27.96159262368592, 5.85065221499273], v: [0.003034129306353885, -0.001545193083508789, -0.0007122969936787857], center: 0, color: PINK }, // Pluto
     Start { gm: 4902.800118, pos: [-0.1862215600840044, 0.9626075632308897, 0.000444671198490556], v: [-0.01683057613107253, -0.003588367637063646, -6.634893538849906e-06], center: EARTH, color: WHITE }, // Moon
 ];
 
@@ -137,13 +140,13 @@ struct Body {
     trail: VecDeque<DVec2>,
 }
 
-/// The Sun, the eight planets and the Moon, all attracting each other (Newtonian N-body), plus
+/// The Sun, the eight planets, Pluto and the Moon, all attracting each other (Newtonian N-body), plus
 /// the first post-Newtonian relativity between every pair of bodies (the Einstein-Infeld-Hoffmann
 /// equations, which is what makes Mercury's orbit precess), the pull of Earth's equatorial
 /// bulge on the Moon and of the Moon's own shape on Earth, with the Moon's rotation integrated
 /// (so that it keeps its long axis pointing at Earth), and the tides the Moon raises on Earth,
 /// which pull the Moon forward and widen its orbit.
-/// Not modelled: asteroids, Pluto and the Kuiper belt, and tidal friction inside the Moon.
+/// Not modelled: asteroids, the rest of the Kuiper belt, and tidal friction inside the Moon.
 /// Motion is 3D, so inclinations are real, but it is drawn from above the ecliptic.
 pub struct Planets {
     /// The Sun is `bodies[0]`.
@@ -169,6 +172,7 @@ impl Planets {
             .map(|(i, start)| {
                 let radius = match i {
                     0 => STAR_RADIUS,
+                    PLUTO => DWARF_PLANET_RADIUS,
                     MOON => MOON_RADIUS,
                     _ => PLANET_RADIUS,
                 };
@@ -187,7 +191,7 @@ impl Planets {
             .collect();
 
         // JPL's frame is centered on the real solar system's barycenter, which also counts the
-        // asteroids, Pluto and so on. Move to the center of mass of the bodies simulated here, so
+        // asteroids, the Kuiper belt and so on. Move to the center of mass of the bodies simulated here, so
         // that total momentum is exactly zero and the Sun's wobble doesn't drift away.
         let total_m: f64 = bodies.iter().map(|body| body.m).sum();
         let center: DVec3 = bodies.iter().map(|body| body.m * body.pos).sum::<DVec3>() / total_m;
@@ -507,8 +511,8 @@ impl Simulation for Planets {
     }
 
     fn world_bounds(&self) -> Rect {
-        // Neptune is at sqrt(30) ~ 5.5 in display coordinates.
-        Rect::new(-8.55, -5.7, 17.1, 11.4)
+        // Neptune is at sqrt(30) ~ 5.5 in display coordinates, Pluto gets out to sqrt(49) = 7.
+        Rect::new(-11.1, -7.4, 22.2, 14.8)
     }
 
     fn draw(&self) {
@@ -621,8 +625,8 @@ mod tests {
         }
     }
 
-    /// Positions of the planets and Moon relative to the Sun on 2050-01-01 12:00 TDB, from JPL Horizons.
-    const HORIZONS_2050: [[f64; 3]; 9] = [
+    /// Positions of the planets, Pluto and the Moon relative to the Sun on 2050-01-01 12:00 TDB, from JPL Horizons.
+    const HORIZONS_2050: [[f64; 3]; 10] = [
     [-0.19383887495353835, 0.2602374876728299, 0.03904203706874512], // Mercury
     [0.15161930466081194, -0.7113792666797559, -0.01856539064507374], // Venus
     [-0.18021419476575784, 0.9666841679689496, -0.00010945166455960886], // Earth
@@ -631,10 +635,11 @@ mod tests {
     [4.768522500057428, -8.772394871483622, -0.03799131630296051], // Saturn
     [-17.823691404915362, 4.069472222215995, 0.24584878419787667], // Uranus
     [17.39691254047843, 24.19870912325753, -0.8992312613560624], // Neptune
+    [37.45564254637691, -15.13181051750434, -9.215026505134704], // Pluto
     [-0.17790332795530533, 0.967745484807643, 1.973134179726551e-05], // Moon
     ];
     /// Same, on 2100-01-01 12:00 TDB.
-    const HORIZONS_2100: [[f64; 3]; 9] = [
+    const HORIZONS_2100: [[f64; 3]; 10] = [
     [0.24751127983976062, -0.34788594901896175, -0.051118551807743585], // Mercury
     [0.6842480981278593, 0.2373629026651644, -0.036129345730427836], // Venus
     [-0.16603049156302818, 0.9692335221873367, -0.0002173730604088772], // Earth
@@ -643,16 +648,17 @@ mod tests {
     [-9.152346961525364, -3.0816461612304074, 0.4182562731062589], // Saturn
     [18.864412332247717, 6.55067331750316, -0.2196427851129807], // Uranus
     [-29.059666113569605, 8.233668973110179, 0.5002350894643763], // Neptune
+    [39.67481612872427, 24.90571724812835, -14.14315856207638], // Pluto
     [-0.16840341577891968, 0.969958343450389, -0.00019673126888694001], // Moon
     ];
 
     /// Error of each simulated body after `days` as an angle (radians): the distance from JPL's
     /// position divided by the distance to the Sun. The Moon is compared relative to Earth, since
     /// seen from the Sun it would mostly measure Earth's error.
-    fn angle_errors_against(planets: &Planets, expected: &[[f64; 3]; 9]) -> Vec<f64> {
+    fn angle_errors_against(planets: &Planets, expected: &[[f64; 3]; 10]) -> Vec<f64> {
         let pos: Vec<DVec3> = planets.bodies.iter().map(|body| body.pos).collect();
         let expected = expected.map(DVec3::from);
-        (1..10)
+        (1..START.len())
             .map(|i| {
                 let (error, distance) = if i == MOON {
                     (pos[MOON] - pos[EARTH] - (expected[MOON - 1] - expected[EARTH - 1]), (expected[MOON - 1] - expected[EARTH - 1]).length())
@@ -678,7 +684,7 @@ mod tests {
     fn agrees_with_jpl_ephemeris() {
         // Planets within 0.05 arcseconds as seen from the Sun, the Moon within 0.4 arcseconds as seen
         // from Earth, and its x and z axes within 0.1 degrees of JPL's. What is left is mostly what
-        // the model leaves out: asteroids, Pluto, and friction inside the Moon.
+        // the model leaves out: asteroids, the Kuiper belt, and friction inside the Moon.
         let arcsec = std::f64::consts::PI / 180.0 / 3600.0;
         for (days, expected, axes) in [(18_263.0, &HORIZONS_2050, MOON_AXES_2050), (36_525.0, &HORIZONS_2100, MOON_AXES_2100)] {
             let planets = simulate(days / DAYS_PER_YEAR, DT);

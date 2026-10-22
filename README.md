@@ -19,6 +19,7 @@ Physics simulations, written for fun in Rust with [macroquad](https://github.com
 | 11 | `light` | A laser beam meeting glass, solved from Maxwell's equations on a grid (FDTD). |
 | 12 | `vortex-street` | Water flowing past a rod at Reynolds number 100, shedding a von Kármán vortex street (lattice Boltzmann). |
 | 13 | `navier-stokes` | The Navier-Stokes equations solved directly: a lid-driven cavity against a benchmark, a Kelvin-Helmholtz shear layer and convection in water heated from below. |
+| 14 | `water` | Water with a free surface in a tank (FLIP): a dam break, sloshing against linear theory, and a drop into a pool. |
 
 ### Running
 

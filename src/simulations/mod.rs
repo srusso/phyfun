@@ -11,6 +11,7 @@ mod slope;
 mod wave_packet;
 mod top;
 mod vortex_street;
+mod water;
 
 use crate::simulation::Simulation;
 
@@ -36,6 +37,7 @@ pub const SIMULATIONS: &[Entry] = &[
     Entry { name: "light", create: || Box::new(light::Light::new()) },
     Entry { name: "vortex-street", create: || Box::new(vortex_street::VortexStreet::new()) },
     Entry { name: "navier-stokes", create: || Box::new(navier_stokes::NavierStokes::new()) },
+    Entry { name: "water", create: || Box::new(water::Water::new()) },
 ];
 
 /// Finds a simulation by name (case-insensitive) or by number.

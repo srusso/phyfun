@@ -29,6 +29,9 @@ const STEPS_PER_FRAME: f64 = 2.0;
 /// One shot stands for this many identically prepared electrons shown at once.
 const ELECTRONS_PER_SHOT: f64 = 2000.0;
 const MAX_DOTS: usize = 6000;
+/// Single electrons: arrivals per second of real time, the start and the choices (+/-).
+const START_RATE: f64 = 3.0;
+const RATES: [f64; 7] = [1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0];
 /// A shot is over when less than this much probability is left on the grid.
 const EMPTY: f64 = 1e-3;
 const BRIGHTNESS_GAIN: f64 = 1.5;
@@ -519,6 +522,18 @@ fn expected_dark_fringes(scene: &Scene, screen_x: f64) -> [f64; 2] {
     [dark_fringe(0.5, d, l, lambda), dark_fringe(1.5, d, l, lambda)]
 }
 
+/// Index of the weight that `pick` (between 0 and the sum of the positive weights) falls in, with
+/// negative weights counted as 0.
+fn pick_row(weights: &[f64], mut pick: f64) -> usize {
+    for (i, weight) in weights.iter().enumerate() {
+        pick -= weight.max(0.0);
+        if pick <= 0.0 {
+            return i;
+        }
+    }
+    weights.len() - 1
+}
+
 /// One electron, described by its wave function psi(x, y, t), fired as a Gaussian wave packet at
 /// nothing (it drifts and spreads), a thin barrier higher than its energy (part tunnels through)
 /// or a wall with two slits (the two waves interfere). Brightness is |psi|, colour the phase.
@@ -526,11 +541,17 @@ fn expected_dark_fringes(scene: &Scene, screen_x: f64) -> [f64; 2] {
 /// fringe pattern shot by shot. The time-dependent Schroedinger equation in 2D by the
 /// split-operator Fourier method on a 512 x 256 grid with absorbing edges. Keys 1-3 choose the
 /// scene.
+/// E switches to single electrons, as in Tonomura's 1989 experiment: they arrive one at a time at
+/// random moments, each makes one dot, and the fringes only emerge from many of them. Every
+/// electron has the same wave function, so once the first wave has passed, the probability that
+/// reached each row of the screen is where an electron lands; the ones that hit the wall or bounce
+/// back are not seen, as in the real experiment.
 /// Not modelled: real-scale double slits (the slits are 8 wavelengths apart, so the screen is in
 /// the near field), the wall as a material, sharp edges finer than the 0.125 nm grid, collapse
 /// (the dots are sampled from the probability flux; one shot stands for 2000 electrons shown at
-/// once), the third dimension, spin and relativity (v/c is 0.0024), and open space (the box is
-/// periodic with absorbing edges, 1e-7 to 1e-5 of the probability survives them).
+/// once, or, with single electrons, the wave is computed once and each electron samples it), the
+/// third dimension, spin and relativity (v/c is 0.0024), and open space (the box is periodic with
+/// absorbing edges, 1e-7 to 1e-5 of the probability survives them).
 pub struct WavePacket {
     scene: Scene,
     wave: Wave,
@@ -542,6 +563,11 @@ pub struct WavePacket {
     dots_due: f64,
     detected: usize,
     shots: usize,
+    /// One electron at a time instead of 2000 per shot.
+    single: bool,
+    /// Single electrons per second of real time, and the real time until the next one.
+    rate: f64,
+    next_electron_in: f64,
     /// Transmission of the barrier for this packet (closed form), for the HUD.
     exact_transmission: f64,
     /// Where the dark fringes should be on the screen (double slit).
@@ -557,6 +583,10 @@ impl WavePacket {
     }
 
     fn with_scene(scene: Scene) -> Self {
+        Self::with_scene_and_mode(scene, false, START_RATE)
+    }
+
+    fn with_scene_and_mode(scene: Scene, single: bool, rate: f64) -> Self {
         let mut wave = Wave::new(NX, NY, DX, scene.dt, scene.potential(), absorber(NX, NY, DX));
         wave.set_packet(&scene.packet);
         let peak = wave.psi.iter().map(|p| p.norm_sqr().sqrt()).fold(0.0, f64::max);
@@ -573,6 +603,9 @@ impl WavePacket {
             dots_due: 0.0,
             detected: 0,
             shots: 0,
+            single,
+            rate,
+            next_electron_in: 0.0,
             exact_transmission,
             dark_fringes,
             peak,
@@ -582,6 +615,33 @@ impl WavePacket {
 
     fn start_speed(&self) -> f64 {
         STEPS_PER_FRAME * 60.0 * self.scene.dt
+    }
+
+    fn add_dot(&mut self, row: usize) {
+        let x = macroquad::rand::gen_range(SCREEN_X as f32, 32.0);
+        let y = self.wave.y(row) as f32 + macroquad::rand::gen_range(-0.5, 0.5) * DX as f32;
+        if self.dots.len() == MAX_DOTS {
+            self.dots.pop_front();
+        }
+        self.dots.push_back(vec2(x, y));
+        self.detected += 1;
+    }
+
+    /// Single electrons due in the `real_seconds` that just passed: Poisson arrivals at `rate`,
+    /// each on a row drawn from the probability that reached the screen during the first shot.
+    fn fire_single_electrons(&mut self, real_seconds: f64) {
+        if self.shots == 0 {
+            return; // the pattern isn't known until the first wave has passed
+        }
+        let total: f64 = self.screen.iter().map(|p| p.max(0.0)).sum();
+        self.next_electron_in -= real_seconds;
+        while self.next_electron_in <= 0.0 {
+            let row = pick_row(&self.screen, macroquad::rand::gen_range(0.0, total));
+            self.add_dot(row);
+            // Exponential waiting time with mean 1 / rate.
+            let u: f64 = macroquad::rand::gen_range(0.0, 1.0);
+            self.next_electron_in += -(1.0 - u).ln() / self.rate;
+        }
     }
 
     /// Probability left of the divider (reflected) and right of it (transmitted).
@@ -604,26 +664,16 @@ impl Simulation for WavePacket {
             *arrived = self.wave.flux_x(self.screen_ix, iy) * self.wave.dt * DX;
             self.screen[iy] += *arrived;
         }
-        let total: f64 = arrivals.iter().map(|a| a.max(0.0)).sum();
-        self.dots_due += ELECTRONS_PER_SHOT * total;
-        while self.dots_due >= 1.0 {
-            self.dots_due -= 1.0;
-            let mut pick = macroquad::rand::gen_range(0.0, total);
-            let mut row = NY - 1;
-            for (iy, arrived) in arrivals.iter().enumerate() {
-                pick -= arrived.max(0.0);
-                if pick <= 0.0 {
-                    row = iy;
-                    break;
-                }
+        if self.single {
+            self.fire_single_electrons(dt / self.speed);
+        } else {
+            let total: f64 = arrivals.iter().map(|a| a.max(0.0)).sum();
+            self.dots_due += ELECTRONS_PER_SHOT * total;
+            while self.dots_due >= 1.0 {
+                self.dots_due -= 1.0;
+                let row = pick_row(&arrivals, macroquad::rand::gen_range(0.0, total));
+                self.add_dot(row);
             }
-            let x = macroquad::rand::gen_range(SCREEN_X as f32, 32.0);
-            let y = self.wave.y(row) as f32 + macroquad::rand::gen_range(-0.5, 0.5) * DX as f32;
-            if self.dots.len() == MAX_DOTS {
-                self.dots.pop_front();
-            }
-            self.dots.push_back(vec2(x, y));
-            self.detected += 1;
         }
 
         // Fire again once nothing is left; the screen and the dots stay, so the pattern builds up.
@@ -647,14 +697,31 @@ impl Simulation for WavePacket {
     }
 
     fn world_bounds(&self) -> Rect {
-        // The grid fills the lower three quarters of the window; the top is for the HUD.
-        Rect::new(-32.0, -16.0, 64.0, 42.67)
+        // The grid fills the lower part of the window; the top is for the five HUD lines.
+        Rect::new(-35.0, -16.0, 70.0, 46.67)
     }
 
     fn handle_input(&mut self) {
         for (key, scene) in [(KeyCode::Key1, Scene::free as fn() -> Scene), (KeyCode::Key2, Scene::barrier), (KeyCode::Key3, Scene::double_slit)] {
             if is_key_pressed(key) {
-                *self = Self::with_scene(scene());
+                *self = Self::with_scene_and_mode(scene(), self.single, self.rate);
+            }
+        }
+        if is_key_pressed(KeyCode::E) {
+            // The two kinds of dots don't mix: start the screen's dots again.
+            self.single = !self.single;
+            self.dots.clear();
+            self.detected = 0;
+            self.dots_due = 0.0;
+            self.next_electron_in = 0.0;
+        }
+        if self.single {
+            let current = RATES.iter().position(|&r| r == self.rate).unwrap_or(1);
+            if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) {
+                self.rate = RATES[(current + 1).min(RATES.len() - 1)];
+            }
+            if is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract) {
+                self.rate = RATES[current.saturating_sub(1)];
             }
         }
         let start = self.start_speed();
@@ -704,6 +771,10 @@ impl Simulation for WavePacket {
         for dot in &self.dots {
             draw_rectangle(dot.x - 0.075, dot.y - 0.075, 0.15, 0.15, WHITE);
         }
+        // With single electrons, the newest one stands out.
+        if self.single && let Some(dot) = self.dots.back() {
+            draw_circle(dot.x, dot.y, 0.35, YELLOW);
+        }
         let most = self.screen.iter().cloned().fold(0.0, f64::max);
         if most > 0.0 {
             for iy in 1..NY {
@@ -750,8 +821,16 @@ impl Simulation for WavePacket {
                 format!("through the slits {:.4}   dark fringes expected at {:.2}, {:.2} nm", through, self.dark_fringes[0], self.dark_fringes[1])
             }
         };
+        let electrons = if !self.single {
+            format!("{} electrons per shot (E: single electrons)", ELECTRONS_PER_SHOT)
+        } else if self.shots == 0 {
+            "single electrons (E): they start once the first wave has passed the screen".to_string()
+        } else {
+            format!("single electrons (E): {} per second (+/-)", self.rate)
+        };
         vec![
             format!("[1] free  [2] barrier  [3] double slit   speed {:.0} fs/s (UP/DOWN)", self.speed),
+            electrons,
             format!("t = {:.1} fs   E = {} eV   wavelength = {:.3} nm   v = {:.3} nm/fs", self.wave.t, packet.energy, TAU / k0, v),
             third,
             format!(
@@ -981,6 +1060,37 @@ mod tests {
         let (reflected, transmitted) = sim.split();
         assert!((transmitted - 0.07960).abs() < 2e-4, "transmitted {transmitted}");
         assert!((reflected + transmitted - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pick_row_follows_the_weights() {
+        let weights = [0.5, -0.2, 0.0, 1.5];
+        assert_eq!(pick_row(&weights, 0.2), 0);
+        assert_eq!(pick_row(&weights, 0.5), 0);
+        assert_eq!(pick_row(&weights, 0.51), 3);
+        assert_eq!(pick_row(&weights, 2.0), 3);
+    }
+
+    #[test]
+    fn single_electrons_arrive_one_by_one_where_the_probability_went() {
+        let mut sim = WavePacket::with_scene_and_mode(Scene::double_slit(), true, 10.0);
+        sim.screen[100] = 0.25;
+        sim.screen[200] = 0.75;
+        sim.screen[150] = -0.1; // backflow never makes a dot
+
+        // Nothing before the first wave has passed.
+        sim.fire_single_electrons(100.0);
+        assert_eq!(sim.detected, 0);
+
+        sim.shots = 1;
+        macroquad::rand::srand(3);
+        sim.fire_single_electrons(500.0);
+        // Poisson: 5000 expected, standard deviation 71.
+        assert!((sim.detected as f64 - 5000.0).abs() < 300.0, "{} electrons in 500 s at 10/s", sim.detected);
+        let row_of = |dot: &Vec2| (dot.y as f64 / DX + (NY / 2) as f64).floor() as usize;
+        let high = sim.dots.iter().filter(|dot| row_of(dot) == 200).count() as f64;
+        assert!(sim.dots.iter().all(|dot| [100, 200].contains(&row_of(dot))));
+        assert!((high / sim.dots.len() as f64 - 0.75).abs() < 0.03, "fraction on the bright row {}", high / sim.dots.len() as f64);
     }
 
     /// Position of the extremum near grid row `iy`, by a parabola through three points.

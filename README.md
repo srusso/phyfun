@@ -15,7 +15,7 @@ Physics simulations, written for fun in Rust with [macroquad](https://github.com
 | 7 | `top` | Rigid bodies turning about a fixed point: a tumbling paperback and spinning tops, in 3D. |
 | 8 | `galaxies` | Two disk galaxies swinging past each other and pulling out tidal bridges and tails. |
 | 9 | `argon` | Molecular dynamics of a 2D argon monolayer with a heat bath, melting from a crystal into a liquid. |
-| 10 | `wavepacket` | An electron's wave function, solved with the Schrödinger equation, going through a double slit and other scenes. |
+| 10 | `wavepacket` | An electron's wave function, solved with the Schrödinger equation, going through a double slit and other scenes, with electrons detected one at a time if you like. |
 | 11 | `light` | A laser beam meeting glass, solved from Maxwell's equations on a grid (FDTD). |
 | 12 | `vortex-street` | Water flowing past a rod at Reynolds number 100, shedding a von Kármán vortex street (lattice Boltzmann). |
 

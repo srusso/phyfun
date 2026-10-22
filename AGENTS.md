@@ -10,6 +10,9 @@ Physics simulations and experiments, written for fun.
 - Graphics: [macroquad](https://github.com/not-fl3/macroquad)
 - Vector calculus / linear algebra: [nalgebra](https://nalgebra.org), only if actually needed. Don't add it for simple 1D/2D math that plain `f32`/`f64` or macroquad's own vector types handle.
 
+## Adding a simulation
+- Every time you add a new simulation, add a row for it (number, name and a one-line description) to the **Simulations** table in `README.md`. Keep the table in the same order as `SIMULATIONS` in `src/simulations/mod.rs`.
+
 ## Code style
 - Keep code easy to read and use.
 - Add short, descriptive comments for non-obvious code (the physics, the integrator, unit conventions). Don't comment what the code already says.

@@ -5,6 +5,7 @@ mod double_pendulum;
 mod galaxies;
 mod ising;
 mod light;
+mod navier_stokes;
 mod planets;
 mod slope;
 mod wave_packet;
@@ -34,6 +35,7 @@ pub const SIMULATIONS: &[Entry] = &[
     Entry { name: "wavepacket", create: || Box::new(wave_packet::WavePacket::new()) },
     Entry { name: "light", create: || Box::new(light::Light::new()) },
     Entry { name: "vortex-street", create: || Box::new(vortex_street::VortexStreet::new()) },
+    Entry { name: "navier-stokes", create: || Box::new(navier_stokes::NavierStokes::new()) },
 ];
 
 /// Finds a simulation by name (case-insensitive) or by number.
